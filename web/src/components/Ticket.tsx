@@ -211,7 +211,8 @@ export function Ticket() {
         </Show>
       </dl>
 
-      <div class="pair">
+      <p class="small muted">One click sends the order. {state.mode === "Netting" ? "This account keeps one net position per symbol." : "Each order opens its own position."}</p>
+      <div class="pair trade-actions">
         <button type="button" class="btn btn-trade sell" disabled={blocked()} onClick={() => submit("Sell")}>
           <span>{label("Sell")}</span>
           <span class="num">{fmtPrice(entry("Sell") || (quote()?.bid ?? 0), symbol())}</span>
@@ -221,7 +222,6 @@ export function Ticket() {
           <span class="num">{fmtPrice(entry("Buy") || (quote()?.ask ?? 0), symbol())}</span>
         </button>
       </div>
-      <p class="small muted">One click sends the order. {state.mode === "Netting" ? "This account keeps one net position per symbol." : "Each order opens its own position."}</p>
     </section>
   );
 }
