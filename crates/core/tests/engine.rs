@@ -233,6 +233,18 @@ fn netting_averages_and_reverses() {
 }
 
 #[test]
+fn netting_reversal_is_all_or_nothing() {
+    let mut e = setup(AccountMode::Netting, 10_000 * USD);
+    run(&mut e, vec![place(order(EURUSD, Side::Buy, LOT))]);
+    let before = (e.positions_of(ACC), e.account_state(ACC));
+    // Selling 50 lots would close the long and open a 49-lot short we cannot afford.
+    let ev = run(&mut e, vec![place(order(EURUSD, Side::Sell, 50 * LOT))]);
+    assert_eq!(rejected(&ev), Some(Reject::NoMoney));
+    assert!(deals(&ev).is_empty());
+    assert_eq!((e.positions_of(ACC), e.account_state(ACC)), before);
+}
+
+#[test]
 fn stop_loss_and_take_profit_fire() {
     let mut e = setup(AccountMode::Hedging, 10_000 * USD);
     run(

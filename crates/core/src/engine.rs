@@ -237,6 +237,10 @@ impl Engine {
         self.accounts.get(&account).map(|a| a.name.as_str())
     }
 
+    pub fn account_leverage(&self, account: AccountId) -> Option<u32> {
+        self.accounts.get(&account).map(|a| a.leverage)
+    }
+
     pub fn account_group(&self, account: AccountId) -> Option<&GroupSpec> {
         self.accounts
             .get(&account)
@@ -784,6 +788,19 @@ impl Engine {
                     return self.increase(p, f, out);
                 }
                 let closed = f.volume.min(p.volume);
+                if f.volume > closed {
+                    // A reversal is one order: check the new side's margin before
+                    // closing anything, so a rejection leaves the position untouched.
+                    let g = &self.groups[acc.group];
+                    let rest = f.volume - closed;
+                    let margin = self
+                        .margin_for(f.symbol, rest, f.price, acc.leverage, g.ccy)
+                        .ok_or(Reject::NoConversionRate)?;
+                    let fees = commission(g.spec.commission_per_lot, f.volume);
+                    if self.equity(acc) - (acc.margin - p.margin) < margin + fees {
+                        return Err(Reject::NoMoney);
+                    }
+                }
                 self.close_part(
                     p.id,
                     closed,

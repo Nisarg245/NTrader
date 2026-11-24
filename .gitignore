@@ -1,3 +1,5 @@
 /target
 /data
 *.log
+/tools/node_modules
+/tools/package*.json

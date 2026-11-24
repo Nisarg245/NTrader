@@ -1,0 +1,37 @@
+/* Design tokens. Change the look here, not in component styles. */
+:root {
+  --ground: #0e1114;
+  --panel: #151a1f;
+  --raised: #1c2329;
+  --pressed: #2a333c;
+  --line: #232a31;
+  --edge: #323b44;
+  --edge-hover: #5b6772;
+
+  --text: #e6e9ec;
+  --strong: #ffffff;
+  --muted: #9aa4ae;
+
+  /* Up/buy and down/sell. Blue and orange stay apart for colour-blind traders. */
+  --up: #5aa2ff;
+  --down: #ff9a4d;
+  --indicator: #d7c9a8;
+
+  --font-ui: "Archivo Variable", "Archivo", sans-serif;
+  --font-num: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  --text-base: 16px;
+  --text-small: 14px;
+  --text-large: 24px;
+
+  /* Spacing scale: 4, 8, 16, 24, 32, 48, 64. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 16px;
+  --s4: 24px;
+  --s5: 32px;
+  --s6: 48px;
+  --s7: 64px;
+
+  --radius: 4px;
+  --control: 48px;
+}

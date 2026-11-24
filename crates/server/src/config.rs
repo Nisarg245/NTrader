@@ -9,6 +9,9 @@ pub struct Config {
     /// fsync the journal after every record.
     #[serde(default)]
     pub journal_sync: bool,
+    /// Folder with the built Web Trader (web/dist). Served at "/" when set.
+    #[serde(default)]
+    pub web_root: Option<PathBuf>,
     #[serde(default)]
     pub feed: Feed,
     #[serde(default, rename = "group")]
@@ -24,6 +27,10 @@ pub struct Feed {
     /// Simulated ticks per second per symbol. 0 disables the simulator.
     #[serde(default)]
     pub sim_ticks_per_second: u32,
+    /// Minutes of made-up chart history to create at start, so charts are not
+    /// empty in development. Only used while the simulator is on.
+    #[serde(default)]
+    pub sim_history_minutes: u32,
 }
 
 #[derive(Deserialize)]

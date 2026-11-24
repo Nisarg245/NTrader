@@ -52,8 +52,19 @@ pub enum ClientMsg {
         #[serde(default)]
         volume: Volume,
     },
+    /// Chart history. `tf` is the bar length in seconds (a multiple of 60).
+    History {
+        symbol: String,
+        tf: u32,
+        #[serde(default)]
+        count: u32,
+    },
     Ping,
 }
+
+/// (time in seconds, open, high, low, close, tick count), built from bid prices.
+#[derive(Clone, Copy, Serialize)]
+pub struct Bar(pub i64, pub Price, pub Price, pub Price, pub Price, pub u32);
 
 #[derive(Serialize)]
 pub struct SymbolInfo {
@@ -71,6 +82,7 @@ pub enum ServerMsg<'a> {
         name: String,
         currency: String,
         mode: AccountMode,
+        leverage: u32,
         account: AccountState,
         symbols: Vec<SymbolInfo>,
         positions: Vec<Position>,
@@ -90,6 +102,12 @@ pub enum ServerMsg<'a> {
     },
     Event {
         event: &'a Event,
+    },
+    /// Bars oldest first: [time in seconds, open, high, low, close, ticks].
+    Candles {
+        s: SymbolId,
+        tf: u32,
+        bars: Vec<Bar>,
     },
     Pong,
 }

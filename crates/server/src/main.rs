@@ -1,3 +1,4 @@
+mod candles;
 mod config;
 mod protocol;
 
@@ -9,9 +10,10 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
+use candles::Candles;
 use config::Config;
 use ntrader_core::*;
-use protocol::{ClientMsg, ServerMsg, SymbolInfo};
+use protocol::{Bar, ClientMsg, ServerMsg, SymbolInfo};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,7 +25,13 @@ const HISTORY_PER_ACCOUNT: usize = 500;
 
 type History = HashMap<AccountId, Vec<Deal>>;
 
-type Query = Box<dyn FnOnce(&Engine, &History) + Send>;
+/// State derived from the event and tick streams, owned by the engine thread.
+struct Derived {
+    history: History,
+    candles: Candles,
+}
+
+type Query = Box<dyn FnOnce(&Engine, &Derived) + Send>;
 
 enum Msg {
     Cmd(Command),
@@ -97,6 +105,11 @@ async fn main() -> Result<()> {
     let (engine_tx, engine_rx) = mpsc::unbounded_channel();
     let (ticks, _) = broadcast::channel(1 << 16);
     let (events, _) = broadcast::channel(1 << 16);
+    let mut candles = Candles::default();
+    if cfg.feed.sim_ticks_per_second > 0 && cfg.feed.sim_history_minutes > 0 {
+        seed_history(&mut candles, &cfg, &symbols);
+    }
+    let derived = Derived { history, candles };
     let app = Arc::new(App {
         engine: engine_tx.clone(),
         ticks: ticks.clone(),
@@ -107,18 +120,30 @@ async fn main() -> Result<()> {
     // The engine owns all trading state on one dedicated thread: no locks on the hot path.
     std::thread::Builder::new()
         .name("engine".into())
-        .spawn(move || run_engine(node, history, engine_rx, ticks, events))?;
+        .spawn(move || run_engine(node, derived, engine_rx, ticks, events))?;
 
     let addr = std::env::var("NTRADER_LISTEN").unwrap_or_else(|_| cfg.listen.clone());
+    let web_root = cfg.web_root.clone();
     if cfg.feed.sim_ticks_per_second > 0 {
         tokio::spawn(simulate_feed(cfg, app.clone()));
         tracing::warn!("simulated feed is ON - prices are random, not market data");
     }
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(upgrade))
         .with_state(app);
+    if let Some(root) = &web_root {
+        if root.join("index.html").exists() {
+            tracing::info!("serving Web Trader from {}", root.display());
+            router = router.fallback_service(tower_http::services::ServeDir::new(root));
+        } else {
+            tracing::warn!(
+                "web_root {} has no index.html - build the Web Trader first (see README)",
+                root.display()
+            );
+        }
+    }
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
@@ -180,7 +205,7 @@ fn bootstrap(node: &mut Node, cfg: &Config) -> Result<()> {
 
 fn run_engine(
     mut node: Node,
-    mut history: History,
+    mut derived: Derived,
     mut rx: mpsc::UnboundedReceiver<Msg>,
     ticks: broadcast::Sender<Tick>,
     events: broadcast::Sender<Arc<Event>>,
@@ -201,6 +226,7 @@ fn run_engine(
                     ts,
                 } = cmd
                 {
+                    derived.candles.tick(symbol, bid, ts);
                     let _ = ticks.send(Tick {
                         symbol,
                         bid,
@@ -209,13 +235,61 @@ fn run_engine(
                     });
                 }
                 for ev in out.drain(..) {
-                    record(&mut history, &ev);
+                    record(&mut derived.history, &ev);
                     let _ = events.send(Arc::new(ev));
                 }
             }
-            Msg::Call(f) => f(&node.engine, &history),
+            Msg::Call(f) => f(&node.engine, &derived),
         }
     }
+}
+
+/// Made-up one-minute bars ending at each symbol's simulator start price, so
+/// charts have something to show in development.
+fn seed_history(candles: &mut Candles, cfg: &Config, symbols: &HashMap<String, SymbolId>) {
+    let mut rng = SmallRng::from_entropy();
+    let minutes = cfg.feed.sim_history_minutes.min(10_000) as i64;
+    let end = now() / 60_000 * 60 - 60;
+    // A bar spans this many simulated ticks; a tick moves about 0.58 * sim_step.
+    let per_bar = (cfg.feed.sim_ticks_per_second as f64 * 60.0).sqrt() * 0.58;
+    for s in cfg.symbols.iter().filter(|s| s.sim_price > 0.0) {
+        let Some(&id) = symbols.get(&s.spec.name) else {
+            continue;
+        };
+        let step = if s.sim_step > 0.0 { s.sim_step } else { 1.0 } * per_bar;
+        let mut walk = Vec::with_capacity(minutes as usize);
+        let mut mid = 0.0f64;
+        for _ in 0..minutes {
+            let open = mid;
+            let mut high = open;
+            let mut low = open;
+            for _ in 0..4 {
+                mid += rng.gen_range(-1.0..1.0) * step / 2.0;
+                high = high.max(mid);
+                low = low.min(mid);
+            }
+            walk.push((open, high, low, mid));
+        }
+        // Shift the whole walk so it ends at the configured start price.
+        let shift = s.sim_price * 10f64.powi(s.spec.digits as i32) - mid;
+        let bars = walk
+            .iter()
+            .enumerate()
+            .map(|(i, (o, h, l, c))| {
+                let p = |v: &f64| ((v + shift).round() as Price).max(1);
+                Bar(
+                    end - (minutes - 1 - i as i64) * 60,
+                    p(o),
+                    p(h),
+                    p(l),
+                    p(c),
+                    1,
+                )
+            })
+            .collect();
+        candles.seed(id, bars);
+    }
+    tracing::warn!("chart history for the last {minutes} minutes is simulated");
 }
 
 /// Random-walk quotes so the platform can be exercised without a market feed.
@@ -298,7 +372,7 @@ fn encode(msg: &ServerMsg, binary: bool) -> Result<Message> {
 /// Ask the engine thread a question and wait for the answer.
 async fn call<T: Send + 'static>(
     app: &App,
-    f: impl FnOnce(&Engine, &History) -> T + Send + 'static,
+    f: impl FnOnce(&Engine, &Derived) -> T + Send + 'static,
 ) -> Result<T> {
     let (tx, rx) = oneshot::channel();
     app.engine
@@ -352,15 +426,17 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
     //    An event may then arrive twice; clients apply events idempotently by id.
     let mut ticks = app.ticks.subscribe();
     let mut events = app.events.subscribe();
-    let snapshot = call(&app, move |e, h| {
+    let snapshot = call(&app, move |e, d| {
         let g = e.account_group(account)?;
-        let deals = h
+        let deals = d
+            .history
             .get(&account)
             .map(|d| d[d.len().saturating_sub(HISTORY_PER_ACCOUNT)..].to_vec());
         Some((
             e.account_name(account)?.to_string(),
             g.currency.clone(),
             g.mode,
+            e.account_leverage(account)?,
             e.account_state(account)?,
             e.symbols()
                 .map(|(id, spec, bid, ask, _)| SymbolInfo {
@@ -377,17 +453,18 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
     })
     .await?
     .context("account vanished")?;
-    let mut watching = vec![false; snapshot.4.len()];
+    let mut watching = vec![false; snapshot.5.len()];
     ws.send(encode(
         &ServerMsg::LoginOk {
             name: snapshot.0,
             currency: snapshot.1,
             mode: snapshot.2,
-            account: snapshot.3,
-            symbols: snapshot.4,
-            positions: snapshot.5,
-            orders: snapshot.6,
-            deals: snapshot.7,
+            leverage: snapshot.3,
+            account: snapshot.4,
+            symbols: snapshot.5,
+            positions: snapshot.6,
+            orders: snapshot.7,
+            deals: snapshot.8,
         },
         binary,
     )?)
@@ -403,6 +480,17 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                 if matches!(msg, Message::Close(_)) { break }
                 let Some((parsed, _)) = decode(&msg) else { continue };
                 let reply = match parsed {
+                    Ok(ClientMsg::History { symbol, tf, count }) => {
+                        match app.symbols.get(&symbol).copied() {
+                            Some(s) if (60..=86_400).contains(&tf) && tf % 60 == 0 => {
+                                let count = if count == 0 { 500 } else { count.min(2_000) } as usize;
+                                let bars = call(&app, move |_, d| d.candles.get(s, tf, count)).await?;
+                                Some(ServerMsg::Candles { s, tf, bars })
+                            }
+                            Some(_) => Some(ServerMsg::Error { message: "unsupported timeframe" }),
+                            None => Some(ServerMsg::Error { message: "unknown symbol" }),
+                        }
+                    }
                     Ok(m) => handle(&app, account, m, &mut watching),
                     Err(_) => Some(ServerMsg::Error { message: "malformed message" }),
                 };
@@ -451,6 +539,8 @@ fn handle(
             })
         }
         ClientMsg::Ping => return Some(ServerMsg::Pong),
+        // Answered in the session loop, because it has to wait for the engine.
+        ClientMsg::History { .. } => return None,
         ClientMsg::Subscribe { symbols } => {
             for s in symbols {
                 if let Some(w) = app

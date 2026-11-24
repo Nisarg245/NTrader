@@ -4,8 +4,8 @@ A trading platform for brokers: server backend, Web Trader, Desktop Trader, Andr
 It is built to replace MT5 at a broker, one deployment per broker, and to let the broker keep
 their liquidity bridge and back-office tools.
 
-**Status: phase 1 of 6.** The trading core and the client gateway work, on simulated prices.
-There is no trader UI, no FIX gateway and no admin panel yet.
+**Status: phase 2 of 6.** The trading core, the client gateway and a first Web Trader work, on
+simulated prices. There is no FIX gateway and no admin panel yet.
 
 ## What works today
 
@@ -16,19 +16,31 @@ There is no trader UI, no FIX gateway and no admin panel yet.
   server replays the log and is back in exactly the state it stopped in.
 - **Client gateway** (`crates/server`): one WebSocket per trader carrying quotes, orders and
   account updates, in MessagePack (binary) or JSON.
+- **Web Trader** (`web`): login, live market watch, candlestick chart with timeframes and a moving
+  average, trade lines on the chart, order ticket (market, limit, stop, stop loss, take profit,
+  sizing by risk), positions with modify and close, pending orders, deal history.
 - **Simulated feed**: random-walk prices so everything can be exercised without market data.
+  Chart history is simulated too.
 
 ## Run it
 
-Needs [Rust](https://rustup.rs) (stable).
+Needs [Rust](https://rustup.rs) (stable) and [Node.js](https://nodejs.org) 22 or newer.
 
 ```powershell
+cd web
+npm install
+npm run build
+cd ..
 cargo run --release -p ntrader-server
 ```
 
-The server reads `config.toml`, creates the demo groups, symbols and accounts on first start, and
-listens on `ws://127.0.0.1:8080/ws`. Demo logins: `1001` / `demo1001` (hedging) and
+Then open http://127.0.0.1:8080 and sign in with a demo login: `1001` / `demo1001` (hedging) or
 `1002` / `demo1002` (netting).
+
+The server reads `config.toml`, creates the demo groups, symbols and accounts on first start,
+serves the built Web Trader from `web/dist`, and takes trader connections on
+`ws://127.0.0.1:8080/ws`. While working on the Web Trader, `npm run dev` in `web` gives live
+reload on its own port and forwards `/ws` to the server.
 
 ```powershell
 cargo test --release                                   # engine tests
@@ -83,13 +95,14 @@ Client → server:
 {"type":"Close","position":42}
 {"type":"Modify","position":42,"sl":108000,"tp":109000}
 {"type":"Cancel","order":43}
+{"type":"History","symbol":"EURUSD","tf":900,"count":600}   // chart bars, tf in seconds
 {"type":"Ping"}
 ```
 
 Server → client: `LoginOk` (account, symbols, open positions, pending orders, recent deals),
 `Tick` (`s` symbol id, `b` bid, `a` ask, `t` time), `Event` (wrapping `Deal`, `Position`,
 `PositionClosed`, `OrderPlaced`, `OrderRemoved`, `Account`, `Rejected`, `MarginCall`, `StopOut`,
-`Balance`), `Error` and `Pong`. Definitions: `crates/server/src/protocol.rs` and
+`Balance`), `Candles` (bars as `[time, open, high, low, close, ticks]`), `Error` and `Pong`. Definitions: `crates/server/src/protocol.rs` and
 `crates/core/src/types.rs`.
 
 ## Roadmap
@@ -97,13 +110,18 @@ Server → client: `LoginOk` (account, symbols, open positions, pending orders, 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Trading core, journal, client gateway, simulated feed | Done |
-| 2 | Web Trader: quotes, chart, order ticket, positions, history | Next |
+| 2 | Web Trader: quotes, chart, order ticket, positions, history | First version done |
 | 3 | Manager API (REST + WebSocket), admin panel, PostgreSQL for history and reports | |
 | 4 | FIX 4.4 gateway, A-book routing to liquidity bridges, real feeds | |
 | 5 | MT5 importer: groups, symbols, accounts, positions, history | |
 | 6 | Desktop Trader, Android and iOS apps | |
 
-## Known limits in phase 1
+## Known limits
+
+- Web Trader: no depth of market, alerts, trailing stop, drawing tools, multiple chart tabs, light
+  theme, economic calendar or deposit yet. These are in the approved design and still to build.
+- Chart bars are kept in memory only, from server start; history before that is simulated when the
+  simulator is on and empty otherwise.
 
 - Execution is B-book only: every order fills at the current quote. A-book routing is phase 4.
 - A fully hedged pair of positions is charged margin on both legs (MT5 charges a reduced hedged margin).

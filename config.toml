@@ -8,10 +8,12 @@
 listen = "127.0.0.1:8080"      # override with the NTRADER_LISTEN environment variable
 journal = "data/journal.log"
 journal_sync = false           # true = fsync every record (slower, survives power loss)
+web_root = "web/dist"          # built Web Trader, served at http://<listen>/
 
 [feed]
 # Random-walk prices for development. Set to 0 once a real feed is connected.
 sim_ticks_per_second = 5
+sim_history_minutes = 1440     # made-up chart history so charts are not empty
 
 [[group]]
 name = "demo-hedge"
