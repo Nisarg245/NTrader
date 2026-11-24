@@ -1,0 +1,102 @@
+# NTrader server configuration.
+#
+# Groups, symbols and accounts below are created on FIRST START ONLY, when the
+# journal is empty. After that the journal is the source of truth.
+#
+# Units: volumes are in 1/10000 lot (100 = 0.01 lot, 10000 = 1 lot).
+
+listen = "127.0.0.1:8080"      # override with the NTRADER_LISTEN environment variable
+journal = "data/journal.log"
+journal_sync = false           # true = fsync every record (slower, survives power loss)
+
+[feed]
+# Random-walk prices for development. Set to 0 once a real feed is connected.
+sim_ticks_per_second = 5
+
+[[group]]
+name = "demo-hedge"
+currency = "USD"
+mode = "Hedging"
+leverage = 100
+margin_call_pct = 100
+stop_out_pct = 50
+
+[[group]]
+name = "demo-net"
+currency = "USD"
+mode = "Netting"
+leverage = 100
+margin_call_pct = 100
+stop_out_pct = 50
+
+[[symbol]]
+name = "EURUSD"
+digits = 5
+contract_size = 100000
+base_ccy = "EUR"
+profit_ccy = "USD"
+calc = "Forex"
+vol_min = 100
+vol_max = 1000000
+vol_step = 100
+swap_long = -6
+swap_short = 2
+sim_price = 1.0850
+sim_spread = 8
+sim_step = 3.0
+
+[[symbol]]
+name = "GBPUSD"
+digits = 5
+contract_size = 100000
+base_ccy = "GBP"
+profit_ccy = "USD"
+calc = "Forex"
+vol_min = 100
+vol_max = 1000000
+vol_step = 100
+sim_price = 1.2700
+sim_spread = 12
+sim_step = 4.0
+
+[[symbol]]
+name = "USDJPY"
+digits = 3
+contract_size = 100000
+base_ccy = "USD"
+profit_ccy = "JPY"
+calc = "Forex"
+vol_min = 100
+vol_max = 1000000
+vol_step = 100
+sim_price = 150.00
+sim_spread = 10
+sim_step = 4.0
+
+[[symbol]]
+name = "XAUUSD"
+digits = 2
+contract_size = 100
+base_ccy = "XAU"
+profit_ccy = "USD"
+calc = "CfdLeverage"
+vol_min = 100
+vol_max = 500000
+vol_step = 100
+sim_price = 2650.00
+sim_spread = 25
+sim_step = 12.0
+
+[[account]]
+id = 1001
+group = "demo-hedge"
+name = "Demo Hedging"
+password = "demo1001"
+deposit = 10000
+
+[[account]]
+id = 1002
+group = "demo-net"
+name = "Demo Netting"
+password = "demo1002"
+deposit = 10000
