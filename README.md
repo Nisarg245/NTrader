@@ -4,8 +4,9 @@ A trading platform for brokers: server backend, Web Trader, Desktop Trader, Andr
 It is built to replace MT5 at a broker, one deployment per broker, and to let the broker keep
 their liquidity bridge and back-office tools.
 
-**Status: phase 2 of 6.** The trading core, the client gateway and a first Web Trader work, on
-simulated prices. There is no FIX gateway and no admin panel yet.
+**Status: phase 3 of 6, in progress.** The trading core, the client gateway, the Web Trader, the
+Manager API and an admin panel work, on simulated prices. There is no FIX gateway yet, and
+history is not in a database yet.
 
 ## What works today
 
@@ -28,6 +29,12 @@ simulated prices. There is no FIX gateway and no admin panel yet.
     exposure, price alerts, broker news, session journal, economic calendar.
   - Light and dark themes, blue/orange or green/red colours, keyboard shortcuts (B, S),
     demo account top-up.
+- **Manager API** (`crates/server/src/manager.rs`): REST under `/api/manager` for the back office:
+  accounts (create, edit, enable/disable, deposit, withdraw, reset password), groups, symbols,
+  all open positions and pending orders (close, cancel), per-account deals, and a summary with
+  client money and exposure.
+- **Admin panel** (`web`, at `/admin`): dashboard, accounts, positions, pending orders, groups
+  and symbols, built on the Manager API.
 - **Simulated feed**: random-walk prices so everything can be exercised without market data.
   Chart history and depth of market are simulated too.
 
@@ -45,6 +52,10 @@ cargo run --release -p ntrader-server
 
 Then open http://127.0.0.1:8080 and sign in with a demo login: `1001` / `demo1001` (hedging) or
 `1002` / `demo1002` (netting).
+
+The admin panel is at http://127.0.0.1:8080/admin, with the manager login from `config.toml`
+(`admin` / `admin-demo-1` as shipped). Change that login before the server is reachable by
+anyone else: see "Manager logins" below.
 
 The server reads `config.toml`, creates the demo groups, symbols and accounts on first start,
 serves the built Web Trader from `web/dist`, and takes trader connections on
@@ -120,18 +131,66 @@ levels as `[price, volume]`), `Alerts` (the account's alert list, sent when it c
 fires), `Error` and `Pong` (with the server time). Definitions: `crates/server/src/protocol.rs` and
 `crates/core/src/types.rs`.
 
+## Manager API
+
+Sign in, then send the token on every call. Money, volumes and prices are the same scaled integers
+as in the trader protocol.
+
+```powershell
+$login = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/manager/login `
+  -ContentType "application/json" -Body '{"login":"admin","password":"admin-demo-1"}'
+$auth = @{ Authorization = "Bearer $($login.token)" }
+Invoke-RestMethod -Uri http://127.0.0.1:8080/api/manager/accounts -Headers $auth
+```
+
+| Method and path | Does |
+|---|---|
+| `POST /login`, `POST /logout` | Start and end a manager session (12 hours) |
+| `GET /summary` | Counts, client money per currency, exposure per symbol |
+| `GET /groups`, `POST /groups`, `PUT /groups/{name}` | List, create, change groups |
+| `GET /symbols`, `POST /symbols`, `PUT /symbols/{name}` | List, create, change symbols |
+| `GET /accounts?search=&group=&limit=`, `POST /accounts` | List and create accounts |
+| `GET /accounts/{id}`, `PATCH /accounts/{id}` | Account with positions, orders, deals; change name, leverage, enabled |
+| `POST /accounts/{id}/balance` | Deposit (positive) or withdraw (negative) |
+| `POST /accounts/{id}/password` | Set a new trader password |
+| `GET /positions`, `POST /positions/{id}/close` | All open positions; close one at market |
+| `GET /orders`, `DELETE /orders/{id}` | All pending orders; cancel one |
+
+All paths are under `/api/manager`. Errors come back as `{"error": "..."}` with a 4xx status.
+
+### Manager logins
+
+Managers are listed in `config.toml` and read at every start:
+
+```toml
+[[manager]]
+login = "ops"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."   # Argon2, PHC format
+```
+
+`password = "..."` is accepted for development and logs a warning. With no `[[manager]]` entry
+the Manager API and the admin panel refuse every login.
+
 ## Roadmap
 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Trading core, journal, client gateway, simulated feed | Done |
 | 2 | Web Trader: every feature in the approved design | Done |
-| 3 | Manager API (REST + WebSocket), admin panel, PostgreSQL for history and reports | |
+| 3 | Manager API and admin panel (done); PostgreSQL for history and reports (not yet) | In progress |
 | 4 | FIX 4.4 gateway, A-book routing to liquidity bridges, real feeds | |
 | 5 | MT5 importer: groups, symbols, accounts, positions, history | |
 | 6 | Desktop Trader, Android and iOS apps | |
 
 ## Known limits
+
+- Manager API: every manager has full access (no roles), sessions are lost when the server
+  restarts, and there is no audit report of manager actions beyond the journal. The admin panel
+  refreshes every three seconds rather than streaming.
+- A symbol added while the server runs has no prices until a feed quotes it, and traders see it
+  after they sign in again. An account cannot be moved to another group.
+- Deal history is still in memory (the last 500 to 1000 deals per account, rebuilt from the
+  journal at start). PostgreSQL storage and reports are the rest of phase 3.
 
 - Depth of market is simulated: the server invents an order book around the quote. Real depth
   needs a feed that carries it (phase 4).

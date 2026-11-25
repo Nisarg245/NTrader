@@ -1,6 +1,7 @@
 mod alerts;
 mod candles;
 mod config;
+mod manager;
 mod protocol;
 
 use alerts::{Alert, Alerts};
@@ -57,6 +58,8 @@ enum Msg {
     Cmd(Command),
     /// Run a query or a change to derived state on the engine thread.
     Call(Query),
+    /// Apply a command and hand its events back to the caller (Manager API).
+    Exec(Command, oneshot::Sender<Vec<Event>>),
 }
 
 #[derive(Clone, Copy)]
@@ -72,8 +75,16 @@ struct App {
     ticks: broadcast::Sender<Tick>,
     events: broadcast::Sender<Arc<Push>>,
     depth: broadcast::Sender<Arc<DepthMsg>>,
-    symbols: HashMap<String, SymbolId>,
+    /// Symbol ids by name. Managers can add symbols while the server runs.
+    symbols: std::sync::RwLock<HashMap<String, SymbolId>>,
     announcements: Vec<config::Announcement>,
+    managers: manager::Managers,
+}
+
+impl App {
+    fn symbol(&self, name: &str) -> Option<SymbolId> {
+        self.symbols.read().ok()?.get(name).copied()
+    }
 }
 
 fn now() -> Ts {
@@ -143,8 +154,9 @@ async fn main() -> Result<()> {
         ticks: ticks.clone(),
         events: events.clone(),
         depth,
-        symbols,
+        symbols: std::sync::RwLock::new(symbols),
         announcements: cfg.announcements.clone(),
+        managers: manager::Managers::from_config(&cfg.managers)?,
     });
 
     // The engine owns all trading state on one dedicated thread: no locks on the hot path.
@@ -162,6 +174,11 @@ async fn main() -> Result<()> {
     let mut router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(upgrade))
+        .route(
+            "/admin",
+            get(|| async { axum::response::Redirect::to("/admin.html") }),
+        )
+        .nest("/api/manager", manager::router(app.clone()))
         .with_state(app);
     if let Some(root) = &web_root {
         if root.join("index.html").exists() {
@@ -243,6 +260,17 @@ fn run_engine(
     let mut out = Vec::new();
     while let Some(msg) = rx.blocking_recv() {
         match msg {
+            Msg::Exec(cmd, reply) => {
+                if let Err(e) = node.apply(&cmd, &mut out) {
+                    tracing::error!("journal write failed, stopping engine: {e}");
+                    std::process::exit(1);
+                }
+                let _ = reply.send(out.clone());
+                for ev in out.drain(..) {
+                    record(&mut derived.history, &ev);
+                    let _ = events.send(Arc::new(Push::Event(ev)));
+                }
+            }
             Msg::Cmd(cmd) => {
                 if let Err(e) = node.apply(&cmd, &mut out) {
                     // Never publish events that are not on disk.
@@ -350,7 +378,7 @@ async fn simulate_feed(cfg: Config, app: Arc<App>) {
         .filter(|s| s.sim_price > 0.0)
         .filter_map(|s| {
             Some(Sim {
-                id: *app.symbols.get(&s.spec.name)?,
+                id: app.symbol(&s.spec.name)?,
                 mid: s.sim_price * 10f64.powi(s.spec.digits as i32),
                 spread: s.sim_spread.max(0),
                 step: if s.sim_step > 0.0 { s.sim_step } else { 1.0 },
@@ -549,7 +577,7 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                 let Some((parsed, _)) = decode(&msg) else { continue };
                 let reply = match parsed {
                     Ok(ClientMsg::History { symbol, tf, count }) => {
-                        match app.symbols.get(&symbol).copied() {
+                        match app.symbol(&symbol) {
                             Some(s) if (60..=86_400).contains(&tf) && tf % 60 == 0 => {
                                 let count = if count == 0 { 500 } else { count.min(2_000) } as usize;
                                 let bars = call(&app, move |_, d| d.candles.get(s, tf, count)).await?;
@@ -560,11 +588,11 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                         }
                     }
                     Ok(ClientMsg::Depth { symbol }) => {
-                        depth_symbol = app.symbols.get(&symbol).copied();
+                        depth_symbol = app.symbol(&symbol);
                         None
                     }
                     Ok(ClientMsg::AlertAdd { symbol, price, note }) => {
-                        match app.symbols.get(&symbol).copied() {
+                        match app.symbol(&symbol) {
                             Some(s) => {
                                 let events = app.events.clone();
                                 let result = call(&app, move |e, d| {
@@ -655,7 +683,7 @@ fn handle(
     app: &App,
     account: AccountId,
     msg: ClientMsg,
-    watching: &mut [bool],
+    watching: &mut Vec<bool>,
 ) -> Option<ServerMsg<'static>> {
     let ts = now();
     let cmd = match msg {
@@ -672,24 +700,18 @@ fn handle(
         | ClientMsg::AlertDelete { .. }
         | ClientMsg::DemoDeposit { .. } => return None,
         ClientMsg::Subscribe { symbols } => {
-            for s in symbols {
-                if let Some(w) = app
-                    .symbols
-                    .get(&s)
-                    .and_then(|i| watching.get_mut(*i as usize))
-                {
-                    *w = true;
+            for i in symbols.iter().filter_map(|s| app.symbol(s)) {
+                // Symbols added since this session logged in are beyond the list it started with.
+                if i as usize >= watching.len() {
+                    watching.resize(i as usize + 1, false);
                 }
+                watching[i as usize] = true;
             }
             return None;
         }
         ClientMsg::Unsubscribe { symbols } => {
-            for s in symbols {
-                if let Some(w) = app
-                    .symbols
-                    .get(&s)
-                    .and_then(|i| watching.get_mut(*i as usize))
-                {
+            for i in symbols.iter().filter_map(|s| app.symbol(s)) {
+                if let Some(w) = watching.get_mut(i as usize) {
                     *w = false;
                 }
             }
@@ -707,7 +729,7 @@ fn handle(
             position,
             trail,
         } => {
-            let Some(&symbol) = app.symbols.get(&symbol) else {
+            let Some(symbol) = app.symbol(&symbol) else {
                 return Some(ServerMsg::Error {
                     message: "unknown symbol",
                 });

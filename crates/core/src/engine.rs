@@ -298,6 +298,71 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    pub fn groups(&self) -> impl Iterator<Item = &GroupSpec> {
+        self.groups.iter().map(|g| &g.spec)
+    }
+
+    /// Accounts in login order, for managers. `filter` decides which to include
+    /// from the cheap fields before the row (with its valuation) is built.
+    pub fn accounts(
+        &self,
+        mut filter: impl FnMut(AccountId, &str, &str) -> bool,
+        limit: usize,
+    ) -> Vec<AccountRow> {
+        let mut ids: Vec<AccountId> = self
+            .accounts
+            .iter()
+            .filter(|(id, a)| filter(**id, &a.name, &self.groups[a.group].spec.name))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids.truncate(limit);
+        ids.into_iter()
+            .filter_map(|id| self.account_row(id))
+            .collect()
+    }
+
+    pub fn account_row(&self, id: AccountId) -> Option<AccountRow> {
+        let a = self.accounts.get(&id)?;
+        let g = &self.groups[a.group].spec;
+        let s = self.account_state(id)?;
+        Some(AccountRow {
+            id,
+            name: a.name.clone(),
+            group: g.name.clone(),
+            currency: g.currency.clone(),
+            leverage: a.leverage,
+            enabled: a.enabled,
+            positions: a.positions.len(),
+            orders: a.orders.len(),
+            balance: s.balance,
+            credit: s.credit,
+            equity: s.equity,
+            margin: s.margin,
+            free_margin: s.free_margin,
+            margin_level: s.margin_level,
+        })
+    }
+
+    /// Every open position, by ticket.
+    pub fn all_positions(&self) -> Vec<Position> {
+        let mut v: Vec<Position> = self.positions.values().copied().collect();
+        v.sort_unstable_by_key(|p| p.id);
+        v
+    }
+
+    /// Every pending order, by ticket.
+    pub fn all_orders(&self) -> Vec<Order> {
+        let mut v: Vec<Order> = self.orders.values().copied().collect();
+        v.sort_unstable_by_key(|o| o.id);
+        v
+    }
+
+    /// Floating profit of a position in its account's currency, swap included.
+    pub fn profit_of(&self, p: &Position) -> Money {
+        self.position_profit(p)
+    }
+
     pub fn account_count(&self) -> usize {
         self.accounts.len()
     }
@@ -413,6 +478,24 @@ impl Engine {
                 self.rollover(*ts, out);
                 return;
             }
+            Command::UpdateGroup { spec, ts } => (0, 0, self.update_group(spec, *ts, out)),
+            Command::UpdateSymbol { spec } => (0, 0, self.update_symbol(spec, out)),
+            Command::UpdateAccount {
+                account,
+                name,
+                leverage,
+                enabled,
+                ..
+            } => (
+                *account,
+                0,
+                self.update_account(*account, name.as_deref(), *leverage, *enabled, out),
+            ),
+            Command::SetPassword {
+                account,
+                password_hash,
+                ..
+            } => (*account, 0, self.set_password(*account, password_hash, out)),
         };
         if let Err(reason) = res {
             out.push(Event::Rejected {
@@ -441,14 +524,16 @@ impl Engine {
         if self.sym_by_name.contains_key(&spec.name) {
             return Err(Reject::AlreadyExists);
         }
-        if spec.digits > 10 || spec.contract_size <= 0 || spec.vol_step <= 0 || spec.vol_min <= 0 {
-            return Err(Reject::InvalidVolume);
+        if !symbol_ok(spec) {
+            return Err(Reject::InvalidSettings);
         }
         let id = self.symbols.len() as SymbolId;
         let base = self.ccy(&spec.base_ccy);
         let profit = self.ccy(&spec.profit_ccy);
         if spec.calc == CalcMode::Forex && base != profit {
-            self.conv.insert((base, profit), id);
+            // The first symbol for a currency pair stays its conversion source, so a
+            // later variant (EURUSD.x, with no quotes yet) cannot break conversions.
+            self.conv.entry((base, profit)).or_insert(id);
         }
         self.symbols.push(Sym {
             spec: spec.clone(),
@@ -472,12 +557,120 @@ impl Engine {
         Ok(())
     }
 
+    fn update_group(
+        &mut self,
+        spec: &GroupSpec,
+        ts: Ts,
+        out: &mut Vec<Event>,
+    ) -> Result<(), Reject> {
+        let i = self
+            .groups
+            .iter()
+            .position(|g| g.spec.name == spec.name)
+            .ok_or(Reject::UnknownGroup)?;
+        let old = &self.groups[i].spec;
+        if old.currency != spec.currency || old.mode != spec.mode {
+            return Err(Reject::Immutable);
+        }
+        if !group_ok(spec) {
+            return Err(Reject::InvalidSettings);
+        }
+        self.groups[i].spec = spec.clone();
+        out.push(Event::GroupUpdated { spec: spec.clone() });
+        // New margin call and stop-out levels apply to open positions at once.
+        let mut members: Vec<AccountId> = self
+            .accounts
+            .iter()
+            .filter(|(_, a)| a.group == i && !a.positions.is_empty())
+            .map(|(id, _)| *id)
+            .collect();
+        members.sort_unstable();
+        for id in members {
+            self.risk_check(id, ts, out);
+        }
+        Ok(())
+    }
+
+    fn update_symbol(&mut self, spec: &SymbolSpec, out: &mut Vec<Event>) -> Result<(), Reject> {
+        let id = *self
+            .sym_by_name
+            .get(&spec.name)
+            .ok_or(Reject::UnknownSymbol)?;
+        let old = &self.symbols[id as usize].spec;
+        if old.digits != spec.digits
+            || old.contract_size != spec.contract_size
+            || old.base_ccy != spec.base_ccy
+            || old.profit_ccy != spec.profit_ccy
+            || old.calc != spec.calc
+        {
+            return Err(Reject::Immutable);
+        }
+        if !symbol_ok(spec) {
+            return Err(Reject::InvalidSettings);
+        }
+        self.symbols[id as usize].spec = spec.clone();
+        out.push(Event::SymbolUpdated {
+            id,
+            spec: spec.clone(),
+        });
+        Ok(())
+    }
+
+    fn update_account(
+        &mut self,
+        account: AccountId,
+        name: Option<&str>,
+        leverage: Option<u32>,
+        enabled: Option<bool>,
+        out: &mut Vec<Event>,
+    ) -> Result<(), Reject> {
+        let a = self
+            .accounts
+            .get_mut(&account)
+            .ok_or(Reject::UnknownAccount)?;
+        if leverage == Some(0) || name.is_some_and(|n| n.trim().is_empty()) {
+            return Err(Reject::InvalidSettings);
+        }
+        if let Some(n) = name {
+            a.name = n.to_string();
+        }
+        if let Some(l) = leverage {
+            // Applies to positions opened from now on; open ones keep their margin.
+            a.leverage = l;
+        }
+        if let Some(e) = enabled {
+            a.enabled = e;
+        }
+        out.push(Event::AccountUpdated {
+            account,
+            name: a.name.clone(),
+            leverage: a.leverage,
+            enabled: a.enabled,
+        });
+        Ok(())
+    }
+
+    fn set_password(
+        &mut self,
+        account: AccountId,
+        password_hash: &str,
+        out: &mut Vec<Event>,
+    ) -> Result<(), Reject> {
+        let a = self
+            .accounts
+            .get_mut(&account)
+            .ok_or(Reject::UnknownAccount)?;
+        a.password_hash = password_hash.to_string();
+        out.push(Event::PasswordChanged { account });
+        Ok(())
+    }
+
     fn add_group(&mut self, spec: &GroupSpec, out: &mut Vec<Event>) -> Result<(), Reject> {
         if self.groups.iter().any(|g| g.spec.name == spec.name) {
             return Err(Reject::AlreadyExists);
         }
-        if spec.leverage == 0 {
-            return Err(Reject::InvalidVolume);
+        if !group_ok(spec) {
+            return Err(Reject::InvalidSettings);
         }
         let ccy = self.ccy(&spec.currency);
         self.groups.push(Group {
@@ -1511,6 +1704,26 @@ fn trail_trigger(p: &Position) -> Option<(BookId, Price)> {
             (price > 0).then_some((BookId::AskLe, price))
         }
     }
+}
+
+fn group_ok(g: &GroupSpec) -> bool {
+    !g.name.trim().is_empty()
+        && !g.currency.trim().is_empty()
+        && g.leverage > 0
+        && g.commission_per_lot >= 0
+        && g.stop_out_pct <= g.margin_call_pct.max(g.stop_out_pct)
+}
+
+fn symbol_ok(s: &SymbolSpec) -> bool {
+    !s.name.trim().is_empty()
+        && s.digits <= 10
+        && s.contract_size > 0
+        && s.vol_step > 0
+        && s.vol_min > 0
+        && s.vol_max >= s.vol_min
+        && s.margin_rate_bp > 0
+        && !s.base_ccy.trim().is_empty()
+        && !s.profit_ccy.trim().is_empty()
 }
 
 fn commission(per_lot: Money, volume: Volume) -> Money {

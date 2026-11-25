@@ -20,9 +20,23 @@ pub struct Config {
     pub symbols: Vec<SymbolConfig>,
     #[serde(default, rename = "account")]
     pub accounts: Vec<AccountConfig>,
+    /// People allowed to use the Manager API and the admin panel. Read at every start.
+    #[serde(default, rename = "manager")]
+    pub managers: Vec<ManagerConfig>,
     /// Calendar entries and news shown to traders. Read at every start.
     #[serde(default, rename = "announcement")]
     pub announcements: Vec<Announcement>,
+}
+
+#[derive(Deserialize)]
+pub struct ManagerConfig {
+    pub login: String,
+    /// Plain password, for development only.
+    #[serde(default)]
+    pub password: String,
+    /// Argon2 hash in PHC format. Use this instead of `password` in production.
+    #[serde(default)]
+    pub password_hash: String,
 }
 
 /// One calendar entry or news item, published by the broker.

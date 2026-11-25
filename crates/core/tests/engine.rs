@@ -211,6 +211,21 @@ fn cross_currency_profit_is_converted() {
 }
 
 #[test]
+fn a_second_symbol_for_a_pair_does_not_break_conversion() {
+    let mut e = setup(AccountMode::Hedging, 10_000 * USD);
+    // Same currencies as EURUSD, added later and not quoted yet.
+    run(
+        &mut e,
+        vec![Command::AddSymbol {
+            spec: forex("EURUSD.x", 5, "EUR", "USD"),
+        }],
+    );
+    let ev = run(&mut e, vec![place(order(EURUSD, Side::Buy, LOT))]);
+    assert_eq!(rejected(&ev), None);
+    assert_eq!(e.positions_of(ACC)[0].margin, 1_100 * USD);
+}
+
+#[test]
 fn netting_averages_and_reverses() {
     let mut e = setup(AccountMode::Netting, 10_000 * USD);
     run(
@@ -469,6 +484,136 @@ fn stop_out_closes_worst_position_first() {
     let ps = e.positions_of(ACC);
     assert_eq!((ps.len(), ps[0].open_price), (1, 109_910));
     assert!(e.account_state(ACC).unwrap().margin_level > 50);
+}
+
+#[test]
+fn manager_updates() {
+    let mut e = setup(AccountMode::Hedging, 2_000 * USD);
+    let group = e.groups().next().unwrap().clone();
+    let eurusd = e.symbols().next().unwrap().1.clone();
+
+    // Account: rename, change leverage, disable. Fields left out are untouched.
+    run(
+        &mut e,
+        vec![Command::UpdateAccount {
+            account: ACC,
+            name: Some("Renamed".into()),
+            leverage: Some(50),
+            enabled: None,
+            ts: 1,
+        }],
+    );
+    let row = e.account_row(ACC).unwrap();
+    assert_eq!(
+        (
+            row.name.as_str(),
+            row.leverage,
+            row.enabled,
+            row.group.as_str()
+        ),
+        ("Renamed", 50, true, "demo")
+    );
+    run(&mut e, vec![place(order(EURUSD, Side::Buy, LOT / 2))]);
+    // 50000 EUR / 50 = 1000 EUR = 1100 USD at the new leverage.
+    assert_eq!(e.positions_of(ACC)[0].margin, 1_100 * USD);
+    run(
+        &mut e,
+        vec![Command::UpdateAccount {
+            account: ACC,
+            name: None,
+            leverage: None,
+            enabled: Some(false),
+            ts: 2,
+        }],
+    );
+    assert_eq!(
+        rejected(&run(&mut e, vec![place(order(EURUSD, Side::Buy, 100))])),
+        Some(Reject::AccountDisabled)
+    );
+    assert_eq!(
+        e.password_hash(ACC),
+        None,
+        "a disabled account cannot sign in"
+    );
+    run(
+        &mut e,
+        vec![Command::UpdateAccount {
+            account: ACC,
+            name: None,
+            leverage: None,
+            enabled: Some(true),
+            ts: 3,
+        }],
+    );
+    run(
+        &mut e,
+        vec![Command::SetPassword {
+            account: ACC,
+            password_hash: "new-hash".into(),
+            ts: 4,
+        }],
+    );
+    assert_eq!(e.password_hash(ACC), Some("new-hash"));
+
+    // Symbol: trading can be switched off; the contract itself cannot change.
+    let off = SymbolSpec {
+        trade_enabled: false,
+        swap_long: -9,
+        ..eurusd.clone()
+    };
+    assert_eq!(
+        rejected(&run(&mut e, vec![Command::UpdateSymbol { spec: off }])),
+        None
+    );
+    assert_eq!(
+        rejected(&run(&mut e, vec![place(order(EURUSD, Side::Buy, 100))])),
+        Some(Reject::TradeDisabled)
+    );
+    let resized = SymbolSpec {
+        contract_size: 1_000,
+        ..eurusd.clone()
+    };
+    assert_eq!(
+        rejected(&run(&mut e, vec![Command::UpdateSymbol { spec: resized }])),
+        Some(Reject::Immutable)
+    );
+    run(&mut e, vec![Command::UpdateSymbol { spec: eurusd }]);
+
+    // Group: raising the stop-out level above the account's margin level closes it at once.
+    run(&mut e, vec![tick(EURUSD, 109_000, 109_010)]);
+    let level = e.account_state(ACC).unwrap().margin_level;
+    assert!(level > 100 && level < 150, "margin level {level}");
+    let other_ccy = GroupSpec {
+        currency: "EUR".into(),
+        ..group.clone()
+    };
+    assert_eq!(
+        rejected(&run(
+            &mut e,
+            vec![Command::UpdateGroup {
+                spec: other_ccy,
+                ts: 5
+            }]
+        )),
+        Some(Reject::Immutable)
+    );
+    let strict = GroupSpec {
+        margin_call_pct: 200,
+        stop_out_pct: 150,
+        ..group
+    };
+    let ev = run(
+        &mut e,
+        vec![Command::UpdateGroup {
+            spec: strict,
+            ts: 6,
+        }],
+    );
+    assert_eq!(deals(&ev)[0].reason, DealReason::StopOut);
+    assert!(e.positions_of(ACC).is_empty());
+    assert_eq!(e.all_positions().len(), 0);
+    assert_eq!(e.accounts(|_, _, group| group == "demo", 10).len(), 1);
+    assert_eq!(e.accounts(|id, _, _| id == 999, 10).len(), 0);
 }
 
 #[test]

@@ -42,3 +42,5 @@ jobs:
           node tools/smoke.mjs
           npm install --no-save --prefix tools playwright-core
           CHROME=$(which google-chrome) node tools/ui-check.mjs
+          node tools/manager-check.mjs
+          CHROME=$(which google-chrome) node tools/admin-check.mjs

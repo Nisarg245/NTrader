@@ -204,10 +204,40 @@ pub enum Command {
     Rollover {
         ts: Ts,
     },
+    /// Change a group's settings. Its name, currency and mode cannot change.
+    UpdateGroup {
+        spec: GroupSpec,
+        ts: Ts,
+    },
+    /// Change a symbol's trading settings. Its name, digits, contract size,
+    /// currencies and margin mode cannot change.
+    UpdateSymbol {
+        spec: SymbolSpec,
+    },
+    /// Change an account. Fields left out stay as they are.
+    UpdateAccount {
+        account: AccountId,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        leverage: Option<u32>,
+        #[serde(default)]
+        enabled: Option<bool>,
+        ts: Ts,
+    },
+    SetPassword {
+        account: AccountId,
+        password_hash: String,
+        ts: Ts,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reject {
+    /// The request tries to change something that is fixed once created.
+    Immutable,
+    /// A group, symbol or account setting is out of range.
+    InvalidSettings,
     UnknownAccount,
     AccountDisabled,
     UnknownSymbol,
@@ -305,6 +335,25 @@ pub struct AccountState {
     pub margin_level: i64,
 }
 
+/// One account as a manager sees it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AccountRow {
+    pub id: AccountId,
+    pub name: String,
+    pub group: String,
+    pub currency: String,
+    pub leverage: u32,
+    pub enabled: bool,
+    pub positions: usize,
+    pub orders: usize,
+    pub balance: Money,
+    pub credit: Money,
+    pub equity: Money,
+    pub margin: Money,
+    pub free_margin: Money,
+    pub margin_level: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
@@ -314,6 +363,22 @@ pub enum Event {
     },
     GroupAdded {
         spec: GroupSpec,
+    },
+    GroupUpdated {
+        spec: GroupSpec,
+    },
+    SymbolUpdated {
+        id: SymbolId,
+        spec: SymbolSpec,
+    },
+    AccountUpdated {
+        account: AccountId,
+        name: String,
+        leverage: u32,
+        enabled: bool,
+    },
+    PasswordChanged {
+        account: AccountId,
     },
     AccountCreated {
         account: AccountId,
@@ -369,8 +434,13 @@ impl Event {
     /// The account this event belongs to, if it is account-specific.
     pub fn account(&self) -> Option<AccountId> {
         Some(match self {
-            Event::SymbolAdded { .. } | Event::GroupAdded { .. } => return None,
+            Event::SymbolAdded { .. }
+            | Event::GroupAdded { .. }
+            | Event::GroupUpdated { .. }
+            | Event::SymbolUpdated { .. } => return None,
             Event::AccountCreated { account, .. }
+            | Event::AccountUpdated { account, .. }
+            | Event::PasswordChanged { account }
             | Event::Balance { account, .. }
             | Event::Rejected { account, .. }
             | Event::OrderRemoved { account, .. }

@@ -1,0 +1,146 @@
+/* Admin panel. Built from the same tokens and controls as the Web Trader. */
+
+.admin {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.admin .brand span {
+  color: var(--indicator);
+}
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s4);
+  padding: 0 var(--s4);
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.admin-nav .brand {
+  padding: var(--s2) 0;
+}
+.admin-nav .end {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-left: auto;
+}
+.admin-nav a.tab {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+.page {
+  flex: 1;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+.page-head h1 {
+  font-size: var(--text-large);
+  font-weight: 700;
+}
+.page-head .end {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+.page-head .input {
+  width: 240px;
+}
+.page h2 {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.card > h2 {
+  padding: var(--s3) var(--s3) var(--s2);
+}
+.card > .empty {
+  padding: var(--s3);
+}
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--s3);
+}
+.tile {
+  padding: var(--s3);
+}
+.tile dt {
+  font-size: var(--text-small);
+  color: var(--muted);
+}
+.tile dd {
+  font-size: var(--text-large);
+  font-weight: 500;
+}
+.alert {
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--down);
+  border-left-width: var(--s1);
+  border-radius: var(--radius);
+  color: var(--text);
+}
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s3);
+}
+dialog.wide {
+  width: min(960px, calc(100vw - var(--s5)));
+  max-height: calc(100vh - var(--s5));
+}
+dialog .section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+}
+dialog .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--s2);
+}
+dialog .row .field {
+  flex: 1 1 160px;
+}
+select.input {
+  appearance: auto;
+}
+.status-on {
+  color: var(--up);
+}
+.status-off {
+  color: var(--down);
+}
+
+.admin-nav .tab[aria-current="page"] {
+  color: var(--strong);
+  border-bottom-color: var(--text);
+  font-weight: 600;
+}
+.admin-nav a {
+  color: var(--muted);
+}
+.admin-nav a:hover {
+  color: var(--text);
+}

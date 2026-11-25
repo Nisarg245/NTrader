@@ -15,6 +15,13 @@ web_root = "web/dist"          # built Web Trader, served at http://<listen>/
 sim_ticks_per_second = 5
 sim_history_minutes = 1440     # made-up chart history so charts are not empty
 
+# Manager logins for the Manager API and the admin panel at http://<listen>/admin
+# This plain password is for development. Before exposing the server, replace
+# it with password_hash (an Argon2 hash) and a login of your own.
+[[manager]]
+login = "admin"
+password = "admin-demo-1"
+
 [[group]]
 name = "demo-hedge"
 demo = true                    # traders may top up their own balance
