@@ -1,7 +1,9 @@
+mod alerts;
 mod candles;
 mod config;
 mod protocol;
 
+use alerts::{Alert, Alerts};
 use anyhow::{Context, Result};
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, SaltString};
 use argon2::{Argon2, PasswordVerifier};
@@ -29,13 +31,31 @@ type History = HashMap<AccountId, Vec<Deal>>;
 struct Derived {
     history: History,
     candles: Candles,
+    alerts: Alerts,
 }
 
-type Query = Box<dyn FnOnce(&Engine, &Derived) + Send>;
+type Query = Box<dyn FnOnce(&Engine, &mut Derived) + Send>;
+
+/// Something pushed to the sessions of one account.
+enum Push {
+    Event(Event),
+    Alerts {
+        account: AccountId,
+        alerts: Vec<Alert>,
+        fired: Option<u64>,
+    },
+}
+
+/// Depth of market for one symbol: (price, volume) levels, best first.
+struct DepthMsg {
+    symbol: SymbolId,
+    bids: Vec<(Price, Volume)>,
+    asks: Vec<(Price, Volume)>,
+}
 
 enum Msg {
     Cmd(Command),
-    /// Run a read-only query on the engine thread.
+    /// Run a query or a change to derived state on the engine thread.
     Call(Query),
 }
 
@@ -50,8 +70,10 @@ struct Tick {
 struct App {
     engine: mpsc::UnboundedSender<Msg>,
     ticks: broadcast::Sender<Tick>,
-    events: broadcast::Sender<Arc<Event>>,
+    events: broadcast::Sender<Arc<Push>>,
+    depth: broadcast::Sender<Arc<DepthMsg>>,
     symbols: HashMap<String, SymbolId>,
+    announcements: Vec<config::Announcement>,
 }
 
 fn now() -> Ts {
@@ -109,12 +131,20 @@ async fn main() -> Result<()> {
     if cfg.feed.sim_ticks_per_second > 0 && cfg.feed.sim_history_minutes > 0 {
         seed_history(&mut candles, &cfg, &symbols);
     }
-    let derived = Derived { history, candles };
+    let alerts = Alerts::load(cfg.journal.with_file_name("alerts.json"));
+    let derived = Derived {
+        history,
+        candles,
+        alerts,
+    };
+    let (depth, _) = broadcast::channel(1 << 10);
     let app = Arc::new(App {
         engine: engine_tx.clone(),
         ticks: ticks.clone(),
         events: events.clone(),
+        depth,
         symbols,
+        announcements: cfg.announcements.clone(),
     });
 
     // The engine owns all trading state on one dedicated thread: no locks on the hot path.
@@ -208,7 +238,7 @@ fn run_engine(
     mut derived: Derived,
     mut rx: mpsc::UnboundedReceiver<Msg>,
     ticks: broadcast::Sender<Tick>,
-    events: broadcast::Sender<Arc<Event>>,
+    events: broadcast::Sender<Arc<Push>>,
 ) {
     let mut out = Vec::new();
     while let Some(msg) = rx.blocking_recv() {
@@ -227,6 +257,13 @@ fn run_engine(
                 } = cmd
                 {
                     derived.candles.tick(symbol, bid, ts);
+                    for (account, id) in derived.alerts.on_tick(symbol, bid, ts) {
+                        let _ = events.send(Arc::new(Push::Alerts {
+                            account,
+                            alerts: derived.alerts.of(account),
+                            fired: Some(id),
+                        }));
+                    }
                     let _ = ticks.send(Tick {
                         symbol,
                         bid,
@@ -236,10 +273,10 @@ fn run_engine(
                 }
                 for ev in out.drain(..) {
                     record(&mut derived.history, &ev);
-                    let _ = events.send(Arc::new(ev));
+                    let _ = events.send(Arc::new(Push::Event(ev)));
                 }
             }
-            Msg::Call(f) => f(&node.engine, &derived),
+            Msg::Call(f) => f(&node.engine, &mut derived),
         }
     }
 }
@@ -270,6 +307,12 @@ fn seed_history(candles: &mut Candles, cfg: &Config, symbols: &HashMap<String, S
             }
             walk.push((open, high, low, mid));
         }
+        // Tick counts like the live simulator produces, so the volume pane has a sensible scale.
+        let per_minute = cfg.feed.sim_ticks_per_second * 60;
+        let mut ticks = || {
+            rng.gen_range(per_minute * 7 / 10..=per_minute * 13 / 10)
+                .max(1)
+        };
         // Shift the whole walk so it ends at the configured start price.
         let shift = s.sim_price * 10f64.powi(s.spec.digits as i32) - mid;
         let bars = walk
@@ -283,7 +326,7 @@ fn seed_history(candles: &mut Candles, cfg: &Config, symbols: &HashMap<String, S
                     p(h),
                     p(l),
                     p(c),
-                    1,
+                    ticks(),
                 )
             })
             .collect();
@@ -299,6 +342,7 @@ async fn simulate_feed(cfg: Config, app: Arc<App>) {
         mid: f64,
         spread: i64,
         step: f64,
+        depth_at: std::time::Instant,
     }
     let mut sims: Vec<Sim> = cfg
         .symbols
@@ -310,6 +354,7 @@ async fn simulate_feed(cfg: Config, app: Arc<App>) {
                 mid: s.sim_price * 10f64.powi(s.spec.digits as i32),
                 spread: s.sim_spread.max(0),
                 step: if s.sim_step > 0.0 { s.sim_step } else { 1.0 },
+                depth_at: std::time::Instant::now(),
             })
         })
         .collect();
@@ -337,6 +382,21 @@ async fn simulate_feed(cfg: Config, app: Arc<App>) {
         };
         if app.engine.send(Msg::Cmd(cmd)).is_err() {
             return;
+        }
+        // A made-up order book around the quote, a few times a second.
+        if s.depth_at.elapsed() >= Duration::from_millis(300) && app.depth.receiver_count() > 0 {
+            s.depth_at = std::time::Instant::now();
+            let mut side = |best: Price, dir: i64| -> Vec<(Price, Volume)> {
+                (0..5)
+                    .map(|i| (best + dir * i, rng.gen_range(5..=100) * 1_000))
+                    .collect()
+            };
+            let msg = DepthMsg {
+                symbol: s.id,
+                bids: side(bid, -1),
+                asks: side(bid + s.spread, 1),
+            };
+            let _ = app.depth.send(Arc::new(msg));
         }
     }
 }
@@ -372,7 +432,7 @@ fn encode(msg: &ServerMsg, binary: bool) -> Result<Message> {
 /// Ask the engine thread a question and wait for the answer.
 async fn call<T: Send + 'static>(
     app: &App,
-    f: impl FnOnce(&Engine, &Derived) -> T + Send + 'static,
+    f: impl FnOnce(&Engine, &mut Derived) -> T + Send + 'static,
 ) -> Result<T> {
     let (tx, rx) = oneshot::channel();
     app.engine
@@ -426,6 +486,8 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
     //    An event may then arrive twice; clients apply events idempotently by id.
     let mut ticks = app.ticks.subscribe();
     let mut events = app.events.subscribe();
+    let mut depth = app.depth.subscribe();
+    let mut depth_symbol: Option<SymbolId> = None;
     let snapshot = call(&app, move |e, d| {
         let g = e.account_group(account)?;
         let deals = d
@@ -444,11 +506,14 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                     spec: spec.clone(),
                     bid,
                     ask,
+                    day_open: d.candles.day_open(id, now()),
                 })
                 .collect::<Vec<_>>(),
             e.positions_of(account),
             e.orders_of(account),
             deals.unwrap_or_default(),
+            g.demo,
+            d.alerts.of(account),
         ))
     })
     .await?
@@ -465,6 +530,9 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
             positions: snapshot.6,
             orders: snapshot.7,
             deals: snapshot.8,
+            demo: snapshot.9,
+            alerts: snapshot.10,
+            announcements: &app.announcements,
         },
         binary,
     )?)
@@ -491,6 +559,50 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                             None => Some(ServerMsg::Error { message: "unknown symbol" }),
                         }
                     }
+                    Ok(ClientMsg::Depth { symbol }) => {
+                        depth_symbol = app.symbols.get(&symbol).copied();
+                        None
+                    }
+                    Ok(ClientMsg::AlertAdd { symbol, price, note }) => {
+                        match app.symbols.get(&symbol).copied() {
+                            Some(s) => {
+                                let events = app.events.clone();
+                                let result = call(&app, move |e, d| {
+                                    let bid = e.quote(s).map(|q| q.0).unwrap_or(0);
+                                    let r = d.alerts.add(account, s, price, &note, bid, now());
+                                    if r.is_ok() {
+                                        let alerts = d.alerts.of(account);
+                                        let _ = events.send(Arc::new(Push::Alerts { account, alerts, fired: None }));
+                                    }
+                                    r
+                                }).await?;
+                                result.err().map(|message| ServerMsg::Error { message })
+                            }
+                            None => Some(ServerMsg::Error { message: "unknown symbol" }),
+                        }
+                    }
+                    Ok(ClientMsg::AlertDelete { id }) => {
+                        let events = app.events.clone();
+                        call(&app, move |_, d| {
+                            if d.alerts.delete(account, id) {
+                                let alerts = d.alerts.of(account);
+                                let _ = events.send(Arc::new(Push::Alerts { account, alerts, fired: None }));
+                            }
+                        }).await?;
+                        None
+                    }
+                    Ok(ClientMsg::DemoDeposit { amount }) => {
+                        let demo = call(&app, move |e, _| e.account_group(account).is_some_and(|g| g.demo)).await?;
+                        if !demo {
+                            Some(ServerMsg::Error { message: "deposits to live accounts are handled by your broker" })
+                        } else if amount <= 0 || amount > 1_000_000 * MONEY_SCALE {
+                            Some(ServerMsg::Error { message: "enter an amount between 1 and 1,000,000" })
+                        } else {
+                            let cmd = Command::Balance { account, amount, comment: "Demo top-up".into(), ts: now() };
+                            let _ = app.engine.send(Msg::Cmd(cmd));
+                            None
+                        }
+                    }
                     Ok(m) => handle(&app, account, m, &mut watching),
                     Err(_) => Some(ServerMsg::Error { message: "malformed message" }),
                 };
@@ -509,12 +621,26 @@ async fn session(mut ws: WebSocket, app: Arc<App>) -> Result<()> {
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => break,
             },
-            e = events.recv() => match e {
-                Ok(ev) => {
-                    if ev.account() == Some(account) {
-                        ws.send(encode(&ServerMsg::Event { event: &ev }, binary)?).await?;
+            d = depth.recv() => {
+                // Depth is a snapshot stream: anything missed is simply replaced by the next one.
+                if let Ok(d) = d {
+                    if depth_symbol == Some(d.symbol) {
+                        let m = ServerMsg::Depth { s: d.symbol, bids: &d.bids, asks: &d.asks, simulated: true };
+                        ws.send(encode(&m, binary)?).await?;
                     }
                 }
+            }
+            e = events.recv() => match e {
+                Ok(push) => match &*push {
+                    Push::Event(ev) if ev.account() == Some(account) => {
+                        ws.send(encode(&ServerMsg::Event { event: ev }, binary)?).await?;
+                    }
+                    Push::Alerts { account: a, alerts, fired } if *a == account => {
+                        let m = ServerMsg::Alerts { alerts: alerts.clone(), fired: *fired };
+                        ws.send(encode(&m, binary)?).await?;
+                    }
+                    _ => {}
+                },
                 // Trade events must not be skipped: drop the client so it logs in again
                 // and gets a fresh snapshot.
                 Err(_) => break,
@@ -538,9 +664,13 @@ fn handle(
                 message: "already logged in",
             })
         }
-        ClientMsg::Ping => return Some(ServerMsg::Pong),
-        // Answered in the session loop, because it has to wait for the engine.
-        ClientMsg::History { .. } => return None,
+        ClientMsg::Ping => return Some(ServerMsg::Pong { t: ts }),
+        // Answered in the session loop, because they wait for the engine or change session state.
+        ClientMsg::History { .. }
+        | ClientMsg::Depth { .. }
+        | ClientMsg::AlertAdd { .. }
+        | ClientMsg::AlertDelete { .. }
+        | ClientMsg::DemoDeposit { .. } => return None,
         ClientMsg::Subscribe { symbols } => {
             for s in symbols {
                 if let Some(w) = app
@@ -575,6 +705,7 @@ fn handle(
             sl,
             tp,
             position,
+            trail,
         } => {
             let Some(&symbol) = app.symbols.get(&symbol) else {
                 return Some(ServerMsg::Error {
@@ -593,16 +724,23 @@ fn handle(
                     sl,
                     tp,
                     position,
+                    trail,
                     ts,
                 },
             }
         }
         ClientMsg::Cancel { order } => Command::CancelOrder { account, order, ts },
-        ClientMsg::Modify { position, sl, tp } => Command::ModifyPosition {
+        ClientMsg::Modify {
+            position,
+            sl,
+            tp,
+            trail,
+        } => Command::ModifyPosition {
             account,
             position,
             sl,
             tp,
+            trail,
             ts,
         },
         ClientMsg::Close { position, volume } => Command::ClosePosition {

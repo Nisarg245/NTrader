@@ -1,18 +1,21 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
+import { prefs } from "../prefs";
 import { convert, fmtLots, fmtMoney, fmtPrice, liveAccount, marginFor, parsePrice, pip, pointsToMoney, symbolById, VOLUME_SCALE } from "../calc";
-import { placeOrder, quotes, state, toast } from "../store";
+import { quotes, state, toast } from "../store";
 import type { OrderKind, Side } from "../types";
+import { lots, requestOrder, setVolumeText as setVolume, volumeText as volume } from "../ui";
 
 const KINDS: OrderKind[] = ["Market", "Limit", "Stop"];
 const QUICK = [100, 1_000, 5_000, 10_000];
 
 export function Ticket() {
   const [kind, setKind] = createSignal<OrderKind>("Market");
-  const [volume, setVolume] = createSignal("0.10");
   const [price, setPrice] = createSignal("");
   const [sl, setSl] = createSignal("");
   const [tp, setTp] = createSignal("");
   const [risk, setRisk] = createSignal("1.00");
+  const [trailing, setTrailing] = createSignal(false);
+  const [trailText, setTrailText] = createSignal("20");
 
   const symbol = createMemo(() => symbolById(state.selected));
   const quote = () => quotes[state.selected];
@@ -30,10 +33,6 @@ export function Ticket() {
     ),
   );
 
-  const lots = createMemo(() => {
-    const v = Number.parseFloat(volume().replace(",", "."));
-    return Number.isFinite(v) ? Math.round(v * VOLUME_SCALE) : 0;
-  });
   const volumeError = createMemo(() => {
     const s = symbol();
     if (!s) return "";
@@ -118,7 +117,13 @@ export function Ticket() {
       toast(`Enter the ${kind().toLowerCase()} price first.`, "error");
       return;
     }
-    placeOrder({ symbol: s.name, side, kind: kind(), volume: lots(), price: at, sl: parsePrice(sl(), s), tp: parsePrice(tp(), s) });
+    const distance = Number.parseFloat(trailText().replace(",", "."));
+    if (trailing() && !(distance > 0)) {
+      toast("Enter the trailing stop distance first.", "error");
+      return;
+    }
+    const trail = trailing() ? Math.round(distance * pip(s).points) : 0;
+    requestOrder({ symbol: s.name, side, kind: kind(), volume: lots(), price: at, sl: parsePrice(sl(), s), tp: parsePrice(tp(), s), trail });
   };
 
   const label = (side: Side) => (kind() === "Market" ? side : `${side} ${kind().toLowerCase()}`);
@@ -183,6 +188,17 @@ export function Ticket() {
       </div>
 
       <div class="field">
+        <label class="check" for="ticket-trailing">
+          <input id="ticket-trailing" type="checkbox" checked={trailing()} onChange={(e) => setTrailing(e.currentTarget.checked)} />
+          Trailing stop
+        </label>
+        <Show when={trailing()}>
+          <label for="ticket-trail">Distance behind the price ({symbol() ? pip(symbol()!).label : "points"})</label>
+          <input id="ticket-trail" class="input num" inputmode="decimal" value={trailText()} onInput={(e) => setTrailText(e.currentTarget.value)} />
+        </Show>
+      </div>
+
+      <div class="field">
         <label for="ticket-risk">Size by risk (% of balance, needs a stop loss)</label>
         <div class="inline">
           <input id="ticket-risk" class="input num" inputmode="decimal" value={risk()} onInput={(e) => setRisk(e.currentTarget.value)} />
@@ -211,7 +227,7 @@ export function Ticket() {
         </Show>
       </dl>
 
-      <p class="small muted">One click sends the order. {state.mode === "Netting" ? "This account keeps one net position per symbol." : "Each order opens its own position."}</p>
+      <p class="small muted">{prefs.oneClick ? "One click sends the order." : "You will be asked to confirm each order."} {state.mode === "Netting" ? "This account keeps one net position per symbol." : "Each order opens its own position."}</p>
       <div class="pair trade-actions">
         <button type="button" class="btn btn-trade sell" disabled={blocked()} onClick={() => submit("Sell")}>
           <span>{label("Sell")}</span>
@@ -222,6 +238,32 @@ export function Ticket() {
           <span class="num">{fmtPrice(entry("Buy") || (quote()?.ask ?? 0), symbol())}</span>
         </button>
       </div>
+      <Calendar />
+    </section>
+  );
+}
+
+function Calendar() {
+  const events = () => state.announcements.filter((a) => a.kind === "calendar");
+  return (
+    <section class="calendar" aria-labelledby="calendar-title">
+      <div class="panel-head" style={{ padding: "0 0 var(--s2)" }}>
+        <h2 id="calendar-title">Economic calendar</h2>
+      </div>
+      <Show when={events().length} fallback={<p class="small muted">Your broker has not published any calendar events.</p>}>
+        <ul>
+          <For each={events()}>
+            {(ev) => (
+              <li>
+                <span class="num muted">{ev.time}</span>
+                <strong>{ev.currency}</strong>
+                <span class="grow">{ev.title}</span>
+                <span class="small muted">{ev.impact}</span>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
     </section>
   );
 }

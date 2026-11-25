@@ -10,17 +10,26 @@ simulated prices. There is no FIX gateway and no admin panel yet.
 ## What works today
 
 - **Trading core** (`crates/core`): accounts, groups, symbols, market / limit / stop orders,
-  stop loss and take profit, hedging and netting accounts, margin (Forex, CFD, CFD-Leverage),
+  stop loss, take profit and trailing stop, hedging and netting accounts, margin (Forex, CFD, CFD-Leverage),
   margin call and stop-out, commission, swaps, multi-currency conversion.
 - **Journal**: every change is written to an append-only log before it is announced. On start the
   server replays the log and is back in exactly the state it stopped in.
 - **Client gateway** (`crates/server`): one WebSocket per trader carrying quotes, orders and
   account updates, in MessagePack (binary) or JSON.
-- **Web Trader** (`web`): login, live market watch, candlestick chart with timeframes and a moving
-  average, trade lines on the chart, order ticket (market, limit, stop, stop loss, take profit,
-  sizing by risk), positions with modify and close, pending orders, deal history.
+- **Web Trader** (`web`):
+  - Market Watch with symbol groups, favourites, day change and depth of market.
+  - Charts: several tabs, two charts side by side, candles / line / area, six timeframes,
+    indicators (moving averages, Bollinger Bands, volume, RSI), drawing tools (trend line,
+    horizontal line, Fibonacci, rectangle, text, measure), trade and alert lines, image export,
+    full screen, quick Sell / Buy.
+  - Order ticket: market, limit and stop orders, stop loss, take profit, trailing stop, sizing by
+    risk, optional confirmation instead of one-click trading.
+  - Positions (modify, close, close all / profitable / losing), pending orders, deal history,
+    exposure, price alerts, broker news, session journal, economic calendar.
+  - Light and dark themes, blue/orange or green/red colours, keyboard shortcuts (B, S),
+    demo account top-up.
 - **Simulated feed**: random-walk prices so everything can be exercised without market data.
-  Chart history is simulated too.
+  Chart history and depth of market are simulated too.
 
 ## Run it
 
@@ -93,7 +102,11 @@ Client → server:
 {"type":"Order","client_id":2,"symbol":"EURUSD","side":"Sell","kind":"Limit","volume":1000,"price":109500}
 {"type":"Order","symbol":"EURUSD","side":"Sell","kind":"Market","volume":500,"position":42}   // hedging: partial close
 {"type":"Close","position":42}
-{"type":"Modify","position":42,"sl":108000,"tp":109000}
+{"type":"Modify","position":42,"sl":108000,"tp":109000,"trail":200}   // trail: trailing stop distance in points
+{"type":"Depth","symbol":"EURUSD"}                          // receive depth of market for one symbol
+{"type":"AlertAdd","symbol":"EURUSD","price":109000,"note":"breakout"}
+{"type":"AlertDelete","id":3}
+{"type":"DemoDeposit","amount":500000000}                   // demo groups only
 {"type":"Cancel","order":43}
 {"type":"History","symbol":"EURUSD","tf":900,"count":600}   // chart bars, tf in seconds
 {"type":"Ping"}
@@ -102,7 +115,9 @@ Client → server:
 Server → client: `LoginOk` (account, symbols, open positions, pending orders, recent deals),
 `Tick` (`s` symbol id, `b` bid, `a` ask, `t` time), `Event` (wrapping `Deal`, `Position`,
 `PositionClosed`, `OrderPlaced`, `OrderRemoved`, `Account`, `Rejected`, `MarginCall`, `StopOut`,
-`Balance`), `Candles` (bars as `[time, open, high, low, close, ticks]`), `Error` and `Pong`. Definitions: `crates/server/src/protocol.rs` and
+`Balance`), `Candles` (bars as `[time, open, high, low, close, ticks]`), `Depth` (bid and ask
+levels as `[price, volume]`), `Alerts` (the account's alert list, sent when it changes or one
+fires), `Error` and `Pong` (with the server time). Definitions: `crates/server/src/protocol.rs` and
 `crates/core/src/types.rs`.
 
 ## Roadmap
@@ -110,7 +125,7 @@ Server → client: `LoginOk` (account, symbols, open positions, pending orders, 
 | Phase | Scope | State |
 |---|---|---|
 | 1 | Trading core, journal, client gateway, simulated feed | Done |
-| 2 | Web Trader: quotes, chart, order ticket, positions, history | First version done |
+| 2 | Web Trader: every feature in the approved design | Done |
 | 3 | Manager API (REST + WebSocket), admin panel, PostgreSQL for history and reports | |
 | 4 | FIX 4.4 gateway, A-book routing to liquidity bridges, real feeds | |
 | 5 | MT5 importer: groups, symbols, accounts, positions, history | |
@@ -118,8 +133,16 @@ Server → client: `LoginOk` (account, symbols, open positions, pending orders, 
 
 ## Known limits
 
-- Web Trader: no depth of market, alerts, trailing stop, drawing tools, multiple chart tabs, light
-  theme, economic calendar or deposit yet. These are in the approved design and still to build.
+- Depth of market is simulated: the server invents an order book around the quote. Real depth
+  needs a feed that carries it (phase 4).
+- The economic calendar and news show what the broker writes under `[[announcement]]` in
+  `config.toml`. There is no connection to a calendar or news provider.
+- Deposit only tops up demo accounts (groups with `demo = true`). Real payments belong to the
+  back office (phase 3).
+- Price alerts are stored on the server (`data/alerts.json`) but are only shown inside the Web
+  Trader. There is no email or push notification.
+- Favourites, chart tabs, drawings and settings are saved in the browser, not on the server.
+- Trailing stops move in steps of a tenth of their distance, not on every tick.
 - Chart bars are kept in memory only, from server start; history before that is simulated when the
   simulator is on and empty otherwise.
 

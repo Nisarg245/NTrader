@@ -92,6 +92,9 @@ pub struct SymbolSpec {
     pub swap_short: i64,
     #[serde(default = "default_true")]
     pub trade_enabled: bool,
+    /// Market Watch group shown to traders ("Forex", "Metals", ...).
+    #[serde(default)]
+    pub category: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -105,6 +108,9 @@ pub struct GroupSpec {
     /// Commission per lot per deal, in account currency.
     #[serde(default)]
     pub commission_per_lot: Money,
+    /// Demo groups let traders top up their own balance.
+    #[serde(default)]
+    pub demo: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -128,6 +134,9 @@ pub struct OrderRequest {
     /// Hedging accounts: the position this market order closes (0 = open a new one).
     #[serde(default)]
     pub position: Id,
+    /// Trailing stop distance in points (0 = none).
+    #[serde(default)]
+    pub trail: Price,
     pub ts: Ts,
 }
 
@@ -172,6 +181,9 @@ pub enum Command {
         position: Id,
         sl: Price,
         tp: Price,
+        /// Trailing stop distance in points (0 = none).
+        #[serde(default)]
+        trail: Price,
         ts: Ts,
     },
     /// Close a position at market. `volume` 0 = all of it.
@@ -255,6 +267,10 @@ pub struct Position {
     pub open_price: Price,
     pub sl: Price,
     pub tp: Price,
+    /// Trailing stop distance in points (0 = none). The stop loss follows the
+    /// price at this distance and only ever moves in the position's favour.
+    #[serde(default)]
+    pub trail: Price,
     pub swap: Money,
     pub margin: Money,
     pub open_ts: Ts,
@@ -272,6 +288,8 @@ pub struct Order {
     pub price: Price,
     pub sl: Price,
     pub tp: Price,
+    #[serde(default)]
+    pub trail: Price,
     pub ts: Ts,
 }
 

@@ -17,6 +17,7 @@ sim_history_minutes = 1440     # made-up chart history so charts are not empty
 
 [[group]]
 name = "demo-hedge"
+demo = true                    # traders may top up their own balance
 currency = "USD"
 mode = "Hedging"
 leverage = 100
@@ -25,6 +26,7 @@ stop_out_pct = 50
 
 [[group]]
 name = "demo-net"
+demo = true
 currency = "USD"
 mode = "Netting"
 leverage = 100
@@ -33,6 +35,7 @@ stop_out_pct = 50
 
 [[symbol]]
 name = "EURUSD"
+category = "Forex"
 digits = 5
 contract_size = 100000
 base_ccy = "EUR"
@@ -49,6 +52,7 @@ sim_step = 3.0
 
 [[symbol]]
 name = "GBPUSD"
+category = "Forex"
 digits = 5
 contract_size = 100000
 base_ccy = "GBP"
@@ -63,6 +67,7 @@ sim_step = 4.0
 
 [[symbol]]
 name = "USDJPY"
+category = "Forex"
 digits = 3
 contract_size = 100000
 base_ccy = "USD"
@@ -77,6 +82,7 @@ sim_step = 4.0
 
 [[symbol]]
 name = "XAUUSD"
+category = "Metals"
 digits = 2
 contract_size = 100
 base_ccy = "XAU"
@@ -102,3 +108,20 @@ group = "demo-net"
 name = "Demo Netting"
 password = "demo1002"
 deposit = 10000
+
+# Calendar entries and news shown in the Web Trader. These are read at every
+# start, so edit them freely. The two below are placeholders: replace them with
+# your own calendar and announcements (or delete them).
+
+[[announcement]]
+kind = "calendar"
+time = "Sample"
+currency = "USD"
+impact = "High"
+title = "Sample event - replace in config.toml"
+
+[[announcement]]
+kind = "news"
+time = "Sample"
+title = "Welcome to the NTrader demo"
+body = "Prices, chart history and depth of market on this server are simulated. Broker announcements published in config.toml appear here."

@@ -16,6 +16,8 @@
   --up: #5aa2ff;
   --down: #ff9a4d;
   --indicator: #d7c9a8;
+  /* Text on the solid Sell and Buy buttons. */
+  --on-trade: #0e1114;
 
   --font-ui: "Archivo Variable", "Archivo", sans-serif;
   --font-num: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
@@ -34,4 +36,34 @@
 
   --radius: 4px;
   --control: 48px;
+}
+
+:root[data-palette="green-red"] {
+  --up: #3ddc97;
+  --down: #ff7a7a;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --ground: #f4f5f7;
+  --panel: #ffffff;
+  --raised: #eef0f3;
+  --pressed: #dfe3e8;
+  --line: #dde1e6;
+  --edge: #b9c0c8;
+  --edge-hover: #7d8791;
+
+  --text: #161a1e;
+  --strong: #000000;
+  --muted: #57616b;
+
+  --up: #1c66d1;
+  --down: #b8510a;
+  --indicator: #8a6d1c;
+  --on-trade: #ffffff;
+}
+
+:root[data-theme="light"][data-palette="green-red"] {
+  --up: #0b7a4b;
+  --down: #c62828;
 }

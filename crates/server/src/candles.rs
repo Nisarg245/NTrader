@@ -40,6 +40,20 @@ impl Candles {
         self.m1.insert(symbol, bars);
     }
 
+    /// The first price of the UTC day containing `now`, or the latest price
+    /// before it when the day has no bar yet. 0 when nothing is known.
+    pub fn day_open(&self, symbol: SymbolId, now: Ts) -> Price {
+        let Some(bars) = self.m1.get(&symbol) else {
+            return 0;
+        };
+        let start = now / 86_400_000 * 86_400;
+        let i = bars.partition_point(|b| b.0 < start);
+        match bars.get(i) {
+            Some(b) => b.1,
+            None => bars.last().map(|b| b.4).unwrap_or(0),
+        }
+    }
+
     /// The last `count` bars of `tf` seconds, oldest first.
     pub fn get(&self, symbol: SymbolId, tf: u32, count: usize) -> Vec<Bar> {
         let tf = tf as i64;

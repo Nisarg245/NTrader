@@ -21,6 +21,7 @@ fn forex(name: &str, digits: u8, base: &str, profit: &str) -> SymbolSpec {
         swap_long: -5,
         swap_short: 2,
         trade_enabled: true,
+        category: String::new(),
     }
 }
 
@@ -35,6 +36,7 @@ fn setup_cmds(mode: AccountMode, deposit: Money) -> Vec<Command> {
                 margin_call_pct: 100,
                 stop_out_pct: 50,
                 commission_per_lot: 0,
+                demo: false,
             },
         },
         Command::AddSymbol {
@@ -97,6 +99,7 @@ fn order(symbol: SymbolId, side: Side, volume: Volume) -> OrderRequest {
         sl: 0,
         tp: 0,
         position: 0,
+        trail: 0,
         ts: 1,
     }
 }
@@ -307,11 +310,68 @@ fn invalid_stops_and_modify() {
             position: id,
             sl: 109_990,
             tp: 0,
+            trail: 0,
             ts: 2,
         }],
     );
     let ev = run(&mut e, vec![tick(EURUSD, 109_990, 110_000)]);
     assert_eq!(deals(&ev)[0].reason, DealReason::StopLoss);
+}
+
+#[test]
+fn trailing_stop_follows_price_and_never_retreats() {
+    let mut e = setup(AccountMode::Hedging, 10_000 * USD);
+    // Buy with a 200-point trailing stop: the stop starts 200 points under the bid.
+    run(
+        &mut e,
+        vec![place(OrderRequest {
+            trail: 200,
+            ..order(EURUSD, Side::Buy, LOT)
+        })],
+    );
+    assert_eq!(e.positions_of(ACC)[0].sl, 109_800);
+    // A small rise is not worth rewriting the stop for (step is a tenth of the distance).
+    assert!(run(&mut e, vec![tick(EURUSD, 110_010, 110_020)]).is_empty());
+    assert_eq!(e.positions_of(ACC)[0].sl, 109_800);
+    // A real rise drags the stop up.
+    let ev = run(&mut e, vec![tick(EURUSD, 110_300, 110_310)]);
+    assert!(matches!(ev[..], [Event::Position { position }] if position.sl == 110_100));
+    // Falling back does not move it, and hitting it closes the position in profit.
+    assert!(run(&mut e, vec![tick(EURUSD, 110_150, 110_160)]).is_empty());
+    let ev = run(&mut e, vec![tick(EURUSD, 110_100, 110_110)]);
+    let d = deals(&ev);
+    assert_eq!((d[0].reason, d[0].profit), (DealReason::StopLoss, 90 * USD));
+
+    // Sell side, added later with Modify, and removed again.
+    run(&mut e, vec![place(order(EURUSD, Side::Sell, LOT))]);
+    let id = e.positions_of(ACC)[0].id;
+    run(
+        &mut e,
+        vec![Command::ModifyPosition {
+            account: ACC,
+            position: id,
+            sl: 0,
+            tp: 0,
+            trail: 100,
+            ts: 3,
+        }],
+    );
+    assert_eq!(e.positions_of(ACC)[0].sl, 110_210);
+    run(&mut e, vec![tick(EURUSD, 109_900, 109_910)]);
+    assert_eq!(e.positions_of(ACC)[0].sl, 110_010);
+    run(
+        &mut e,
+        vec![Command::ModifyPosition {
+            account: ACC,
+            position: id,
+            sl: 110_010,
+            tp: 0,
+            trail: 0,
+            ts: 4,
+        }],
+    );
+    run(&mut e, vec![tick(EURUSD, 109_500, 109_510)]);
+    assert_eq!(e.positions_of(ACC)[0].sl, 110_010);
 }
 
 #[test]
@@ -551,6 +611,11 @@ fn random_session(seed: u64, steps: usize, mut each: impl FnMut(&Command)) {
                 account: 1 + rng.next() % 40,
                 sl,
                 tp,
+                trail: if rng.next().is_multiple_of(4) {
+                    30 + (rng.next() % 200) as i64
+                } else {
+                    0
+                },
                 ts: step as i64,
                 ..order(s as SymbolId, side, 100 * (1 + rng.next() % 80) as i64)
             })
@@ -641,6 +706,8 @@ fn journal_replay_matches_a_long_random_session() {
         assert_eq!(back.engine.positions_of(id), live.engine.positions_of(id));
     }
     let lines = std::fs::read_to_string(&path).unwrap().lines().count();
-    assert!(lines < n / 2, "{lines} journal lines for {n} commands");
+    // Quiet ticks are not stored. This session is far busier than a real one
+    // (an order every sixth tick, many with trailing stops), so most are not quiet.
+    assert!(lines < n * 3 / 4, "{lines} journal lines for {n} commands");
     let _ = std::fs::remove_file(&path);
 }

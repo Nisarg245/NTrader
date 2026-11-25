@@ -21,9 +21,36 @@ export interface SymbolInfo {
   swap_long: number;
   swap_short: number;
   trade_enabled: boolean;
+  category: string;
   bid: number;
   ask: number;
+  /** First price of the current UTC day, 0 if unknown. */
+  day_open: number;
 }
+
+export interface Alert {
+  id: number;
+  symbol: number;
+  /** Fires when the bid rises to the price (true) or falls to it (false). */
+  above: boolean;
+  price: number;
+  note: string;
+  created: number;
+  /** When it fired, 0 while waiting. */
+  fired: number;
+}
+
+export interface Announcement {
+  kind: string;
+  time: string;
+  title: string;
+  currency: string;
+  impact: string;
+  body: string;
+}
+
+/** [price, volume] */
+export type Level = [number, number];
 
 export interface Position {
   id: number;
@@ -34,6 +61,8 @@ export interface Position {
   open_price: number;
   sl: number;
   tp: number;
+  /** Trailing stop distance in points, 0 = none. */
+  trail: number;
   swap: number;
   margin: number;
   open_ts: number;
@@ -101,17 +130,22 @@ export type ServerMsg =
       currency: string;
       mode: "Hedging" | "Netting";
       leverage: number;
+      demo: boolean;
       account: AccountState;
       symbols: SymbolInfo[];
       positions: Position[];
       orders: Order[];
       deals: Deal[];
+      alerts: Alert[];
+      announcements: Announcement[];
     }
   | { type: "Error"; message: string }
   | { type: "Tick"; s: number; b: number; a: number; t: number }
   | { type: "Event"; event: ServerEvent }
   | { type: "Candles"; s: number; tf: number; bars: Bar[] }
-  | { type: "Pong" };
+  | { type: "Alerts"; alerts: Alert[]; fired: number | null }
+  | { type: "Depth"; s: number; bids: Level[]; asks: Level[]; simulated: boolean }
+  | { type: "Pong"; t: number };
 
 export type ClientMsg =
   | { type: "Login"; account: number; password: string }
@@ -127,9 +161,14 @@ export type ClientMsg =
       sl?: number;
       tp?: number;
       position?: number;
+      trail?: number;
     }
   | { type: "Cancel"; order: number }
-  | { type: "Modify"; position: number; sl: number; tp: number }
+  | { type: "Modify"; position: number; sl: number; tp: number; trail: number }
+  | { type: "Depth"; symbol: string }
+  | { type: "AlertAdd"; symbol: string; price: number; note: string }
+  | { type: "AlertDelete"; id: number }
+  | { type: "DemoDeposit"; amount: number }
   | { type: "Close"; position: number; volume?: number }
   | { type: "History"; symbol: string; tf: number; count: number }
   | { type: "Ping" };

@@ -5,6 +5,8 @@
 //! login frame used. All prices, volumes and money are scaled integers, see
 //! `ntrader_core::types`.
 
+use crate::alerts::Alert;
+use crate::config::Announcement;
 use ntrader_core::*;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +38,9 @@ pub enum ClientMsg {
         tp: Price,
         #[serde(default)]
         position: Id,
+        /// Trailing stop distance in points.
+        #[serde(default)]
+        trail: Price,
     },
     Cancel {
         order: Id,
@@ -46,11 +51,30 @@ pub enum ClientMsg {
         sl: Price,
         #[serde(default)]
         tp: Price,
+        #[serde(default)]
+        trail: Price,
     },
     Close {
         position: Id,
         #[serde(default)]
         volume: Volume,
+    },
+    /// Choose the one symbol to receive depth of market for ("" = none).
+    Depth {
+        symbol: String,
+    },
+    AlertAdd {
+        symbol: String,
+        price: Price,
+        #[serde(default)]
+        note: String,
+    },
+    AlertDelete {
+        id: u64,
+    },
+    /// Top up a demo account. Refused unless the account's group is a demo group.
+    DemoDeposit {
+        amount: Money,
     },
     /// Chart history. `tf` is the bar length in seconds (a multiple of 60).
     History {
@@ -73,8 +97,13 @@ pub struct SymbolInfo {
     pub spec: SymbolSpec,
     pub bid: Price,
     pub ask: Price,
+    /// First price of the current UTC day, for the day's change (0 = unknown).
+    pub day_open: Price,
 }
 
+// Messages are built, encoded and dropped at once, so the size gap between
+// the login snapshot and a tick costs nothing worth boxing for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub enum ServerMsg<'a> {
@@ -83,12 +112,16 @@ pub enum ServerMsg<'a> {
         currency: String,
         mode: AccountMode,
         leverage: u32,
+        /// Demo accounts can top up their own balance.
+        demo: bool,
         account: AccountState,
         symbols: Vec<SymbolInfo>,
         positions: Vec<Position>,
         orders: Vec<Order>,
         /// Most recent deals, oldest first.
         deals: Vec<Deal>,
+        alerts: Vec<Alert>,
+        announcements: &'a [Announcement],
     },
     Error {
         message: &'a str,
@@ -109,7 +142,24 @@ pub enum ServerMsg<'a> {
         tf: u32,
         bars: Vec<Bar>,
     },
-    Pong,
+    /// The account's full alert list, sent whenever it changes. `fired` names
+    /// the alert that has just been reached, if that is why it changed.
+    Alerts {
+        alerts: Vec<Alert>,
+        fired: Option<u64>,
+    },
+    /// Depth of market: (price, volume) levels, best first.
+    Depth {
+        s: SymbolId,
+        bids: &'a [(Price, Volume)],
+        asks: &'a [(Price, Volume)],
+        /// True when the levels come from the simulator, not a market feed.
+        simulated: bool,
+    },
+    /// `t` is the server clock in Unix milliseconds.
+    Pong {
+        t: Ts,
+    },
 }
 
 #[cfg(test)]

@@ -9,12 +9,17 @@ enum Trig {
     Sl,
     Tp,
     Pending,
+    /// Move a trailing stop loss up behind the price.
+    Trail,
     /// Margin re-check for an account (see `Engine::risk_check`).
     Risk,
 }
 
 /// Marks a book key as an account id rather than an order or position id.
 const RISK: Id = 1 << 63;
+/// Marks a book key as a position's trailing-stop trigger, so it cannot collide
+/// with the same position's take profit in the same book.
+const TRAIL: Id = 1 << 62;
 
 /// Each symbol has four books, one per trigger condition, so a tick only
 /// touches the entries it actually fires.
@@ -163,6 +168,7 @@ struct Fill {
     price: Price,
     sl: Price,
     tp: Price,
+    trail: Price,
     /// Position to close (hedging), 0 = none.
     target: Id,
     order: Id,
@@ -186,6 +192,19 @@ pub struct Engine {
     next_account: AccountId,
     hits: Vec<(Id, Trig)>,
     fired: bool,
+}
+
+/// With a trailing stop, the stop loss is the tighter of the given one and the
+/// level `trail` points behind `close` (the position's closing price).
+fn with_trail(side: Side, close: Price, sl: Price, trail: Price) -> Price {
+    if trail <= 0 {
+        return sl;
+    }
+    match side {
+        Side::Buy => sl.max((close - trail).max(1)),
+        Side::Sell if sl == 0 => close + trail,
+        Side::Sell => sl.min(close + trail),
+    }
 }
 
 fn stops_ok(side: Side, reference: Price, sl: Price, tp: Price) -> bool {
@@ -373,8 +392,13 @@ impl Engine {
                 position,
                 sl,
                 tp,
+                trail,
                 ..
-            } => (*account, 0, self.modify(*account, *position, *sl, *tp, out)),
+            } => (
+                *account,
+                0,
+                self.modify(*account, *position, *sl, *tp, *trail, out),
+            ),
             Command::ClosePosition {
                 account,
                 position,
@@ -564,7 +588,8 @@ impl Engine {
         match r.kind {
             OrderKind::Market => {
                 let price = y.open_price(r.side);
-                if !closing && !stops_ok(r.side, y.close_price(r.side), r.sl, r.tp) {
+                if !closing && (r.trail < 0 || !stops_ok(r.side, y.close_price(r.side), r.sl, r.tp))
+                {
                     return Err(Reject::InvalidStops);
                 }
                 let order = self.id();
@@ -577,6 +602,7 @@ impl Engine {
                         price,
                         sl: r.sl,
                         tp: r.tp,
+                        trail: r.trail,
                         target: r.position,
                         order,
                         client_id: r.client_id,
@@ -598,7 +624,7 @@ impl Engine {
                 if r.price <= 0 || !valid || closing {
                     return Err(Reject::InvalidPrice);
                 }
-                if !stops_ok(r.side, r.price, r.sl, r.tp) {
+                if r.trail < 0 || !stops_ok(r.side, r.price, r.sl, r.tp) {
                     return Err(Reject::InvalidStops);
                 }
                 let id = self.id();
@@ -612,6 +638,7 @@ impl Engine {
                     price: r.price,
                     sl: r.sl,
                     tp: r.tp,
+                    trail: r.trail,
                     ts: r.ts,
                 };
                 self.orders.insert(id, o);
@@ -663,6 +690,7 @@ impl Engine {
         position: Id,
         sl: Price,
         tp: Price,
+        trail: Price,
         out: &mut Vec<Event>,
     ) -> Result<(), Reject> {
         let mut p = *self
@@ -673,12 +701,13 @@ impl Engine {
             return Err(Reject::PositionNotFound);
         }
         let reference = self.symbols[p.symbol as usize].close_price(p.side);
-        if !stops_ok(p.side, reference, sl, tp) {
+        if trail < 0 || !stops_ok(p.side, reference, sl, tp) {
             return Err(Reject::InvalidStops);
         }
         self.disarm(&p);
-        p.sl = sl;
+        p.sl = with_trail(p.side, reference, sl, trail);
         p.tp = tp;
+        p.trail = trail;
         self.positions.insert(position, p);
         self.arm(&p);
         out.push(Event::Position { position: p });
@@ -844,8 +873,14 @@ impl Engine {
             side: f.side,
             volume: f.volume,
             open_price: f.price,
-            sl: f.sl,
+            sl: with_trail(
+                f.side,
+                self.symbols[f.symbol as usize].close_price(f.side),
+                f.sl,
+                f.trail,
+            ),
             tp: f.tp,
+            trail: f.trail,
             swap: 0,
             margin,
             open_ts: f.ts,
@@ -900,8 +935,14 @@ impl Engine {
             volume,
             open_price,
             margin,
-            sl: if f.sl != 0 { f.sl } else { old.sl },
+            sl: with_trail(
+                old.side,
+                self.symbols[f.symbol as usize].close_price(old.side),
+                if f.sl != 0 { f.sl } else { old.sl },
+                if f.trail != 0 { f.trail } else { old.trail },
+            ),
             tp: if f.tp != 0 { f.tp } else { old.tp },
+            trail: if f.trail != 0 { f.trail } else { old.trail },
             ..old
         };
         let deal = self.id();
@@ -1026,6 +1067,9 @@ impl Engine {
         if p.tp > 0 {
             y.book(tp_book(p.side)).insert((p.tp, p.id), Trig::Tp);
         }
+        if let Some((book, price)) = trail_trigger(p) {
+            y.book(book).insert((price, TRAIL | p.id), Trig::Trail);
+        }
     }
 
     fn disarm(&mut self, p: &Position) {
@@ -1035,6 +1079,9 @@ impl Engine {
         }
         if p.tp > 0 {
             y.book(tp_book(p.side)).remove(&(p.tp, p.id));
+        }
+        if let Some((book, price)) = trail_trigger(p) {
+            y.book(book).remove(&(price, TRAIL | p.id));
         }
     }
 
@@ -1188,6 +1235,20 @@ impl Engine {
                     self.close_part(id, p.volume, price, order, 0, reason, ts, out);
                     self.settle(p.account, ts, out);
                 }
+                Trig::Trail => {
+                    let Some(mut p) = self.positions.get(&(id & !TRAIL)).copied() else {
+                        continue;
+                    };
+                    let close = self.symbols[symbol as usize].close_price(p.side);
+                    let sl = with_trail(p.side, close, p.sl, p.trail);
+                    if sl != p.sl {
+                        self.disarm(&p);
+                        p.sl = sl;
+                        self.positions.insert(p.id, p);
+                        self.arm(&p);
+                        out.push(Event::Position { position: p });
+                    }
+                }
                 Trig::Pending => self.trigger(id, ts, out),
                 Trig::Risk => self.risk_check(id & !RISK, ts, out),
             }
@@ -1210,6 +1271,7 @@ impl Engine {
                 price,
                 sl: o.sl,
                 tp: o.tp,
+                trail: o.trail,
                 target: 0,
                 order: o.id,
                 client_id: 0,
@@ -1431,6 +1493,23 @@ impl Engine {
             );
         }
         self.push_account(account, out);
+    }
+}
+
+/// Where a position's trailing stop next needs to move: the book and price at
+/// which the stop loss would improve by a worthwhile step (a tenth of the
+/// distance), so the stop is not rewritten on every tick.
+fn trail_trigger(p: &Position) -> Option<(BookId, Price)> {
+    if p.trail <= 0 || p.sl <= 0 {
+        return None;
+    }
+    let step = (p.trail / 10).max(1);
+    match p.side {
+        Side::Buy => Some((BookId::BidGe, p.sl + p.trail + step)),
+        Side::Sell => {
+            let price = p.sl - p.trail - step;
+            (price > 0).then_some((BookId::AskLe, price))
+        }
     }
 }
 

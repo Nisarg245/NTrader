@@ -20,6 +20,26 @@ pub struct Config {
     pub symbols: Vec<SymbolConfig>,
     #[serde(default, rename = "account")]
     pub accounts: Vec<AccountConfig>,
+    /// Calendar entries and news shown to traders. Read at every start.
+    #[serde(default, rename = "announcement")]
+    pub announcements: Vec<Announcement>,
+}
+
+/// One calendar entry or news item, published by the broker.
+#[derive(Deserialize, serde::Serialize, Clone)]
+pub struct Announcement {
+    /// "calendar" (economic event) or "news".
+    pub kind: String,
+    /// Shown as written, for example "25 Nov 18:00 UTC".
+    pub time: String,
+    pub title: String,
+    #[serde(default)]
+    pub currency: String,
+    /// Calendar: "High", "Medium" or "Low".
+    #[serde(default)]
+    pub impact: String,
+    #[serde(default)]
+    pub body: String,
 }
 
 #[derive(Deserialize, Default)]

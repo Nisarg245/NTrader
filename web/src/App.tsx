@@ -1,13 +1,45 @@
-import { For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from "solid-js";
 import { ChartPanel } from "./components/Chart";
+import { Dialogs } from "./components/Dialogs";
 import { Header } from "./components/Header";
 import { Login } from "./components/Login";
 import { MarketWatch } from "./components/MarketWatch";
 import { Ticket } from "./components/Ticket";
 import { Trades } from "./components/Trades";
+import { persistPrefs, prefs } from "./prefs";
 import { dismissToast, state } from "./store";
+import { quickTrade, reconcileTabs } from "./ui";
 
 export function App() {
+  persistPrefs();
+  // Saved chart tabs are matched to the server's symbols after every login.
+  createEffect(on(() => state.symbols.length, (n) => n > 0 && reconcileTabs()));
+
+  // In split view the second chart is the tab after the active one.
+  const charts = createMemo(() => {
+    const n = prefs.tabs.length;
+    if (n === 0) return [];
+    return prefs.split && n > 1 ? [prefs.active, (prefs.active + 1) % n] : [prefs.active];
+  });
+
+  const [clock, setClock] = createSignal(Date.now());
+  onMount(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    // B and S trade at market, unless the user is typing or a dialog is open.
+    const keys = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !state.account) return;
+      if (el.closest("input, textarea, select, [contenteditable], dialog") || document.querySelector("dialog[open]")) return;
+      if (e.key === "b" || e.key === "B") quickTrade("Buy");
+      if (e.key === "s" || e.key === "S") quickTrade("Sell");
+    };
+    window.addEventListener("keydown", keys);
+    onCleanup(() => {
+      window.clearInterval(timer);
+      window.removeEventListener("keydown", keys);
+    });
+  });
+
   return (
     <Show when={state.account} fallback={<Login />}>
       <div class="app">
@@ -19,7 +51,9 @@ export function App() {
         </Show>
         <main class="main">
           <MarketWatch />
-          <ChartPanel />
+          <div class="charts">
+            <For each={charts()}>{(i) => <ChartPanel index={i} />}</For>
+          </div>
           <Ticket />
         </main>
         <Trades />
@@ -31,9 +65,12 @@ export function App() {
           </span>
           <span>{location.host}</span>
           <span>
+            {state.demo ? "Demo · " : ""}
             {state.mode} · 1:{state.leverage} · {state.currency}
           </span>
-          <span class="end">NTrader Web 0.1</span>
+          <span class="num">Server time {new Date(clock() + state.clockOffset).toISOString().slice(11, 19)} UTC</span>
+          <span class="end">Shortcuts: B buy · S sell · Esc cancel</span>
+          <span>NTrader Web 0.2</span>
         </footer>
       </div>
       <div class="toasts" role="status" aria-live="polite">
@@ -48,6 +85,7 @@ export function App() {
           )}
         </For>
       </div>
+      <Dialogs />
     </Show>
   );
 }

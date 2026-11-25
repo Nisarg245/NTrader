@@ -34,6 +34,7 @@ fn main() {
                 margin_call_pct: 100,
                 stop_out_pct: 50,
                 commission_per_lot: 0,
+                demo: false,
             },
         },
         &mut out,
@@ -56,6 +57,7 @@ fn main() {
                     swap_long: 0,
                     swap_short: 0,
                     trade_enabled: true,
+                    category: String::new(),
                 },
             },
             &mut out,
@@ -123,6 +125,7 @@ fn main() {
                 sl,
                 tp,
                 position: 0,
+                trail: 0,
                 ts: 0,
             };
             e.apply(&Command::PlaceOrder { req }, &mut out);
@@ -140,6 +143,7 @@ fn main() {
             sl: 0,
             tp: 0,
             position: 0,
+            trail: 0,
             ts: 0,
         };
         e.apply(&Command::PlaceOrder { req }, &mut out);
